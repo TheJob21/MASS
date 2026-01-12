@@ -102,6 +102,62 @@ def intervalToState(start, stop, fftSize):
     state[start:stop] = True
     return state
 
+def computeRewardsForAgents(
+    numAgents,
+    agentActionMap,
+    agentPrevRewardMap,
+    agentCumulativeRewardMap,
+    interferingActionMaps,
+    fftSize,
+    collisionWeight
+):
+    """
+    Generic reward computation for any agent group.
+
+    Parameters
+    ----------
+    numAgents : int
+        Number of agents in this group
+    agentActionMap : dict[int, (start, stop)]
+        Actions for this agent group
+    agentPrevRewardMap : dict[int, float]
+        Per-step rewards
+    agentCumulativeRewardMap : dict[int, float]
+        Accumulated rewards
+    interferingActionMaps : list[dict]
+        Other agents' action maps that cause interference
+    """
+
+    for agent in range(numAgents):
+        if agent not in agentActionMap or agentActionMap[agent] is None:
+            continue
+
+        start, stop = agentActionMap[agent]
+        countTx = stop - start
+
+        reward = 0
+        if countTx > 0:
+            state = initState(fftSize)
+
+            # Other agents of same type
+            for otherAgent, interval in agentActionMap.items():
+                if otherAgent != agent:
+                    state = updateStateInterval(state, interval)
+
+            # Interfering agents
+            for actionMap in interferingActionMaps:
+                for interval in actionMap.values():
+                    state = updateStateInterval(state, interval)
+
+            collisionsCount = computeCollisionsInterval(
+                state, agentActionMap[agent]
+            )
+
+            reward = countTx - collisionWeight * collisionsCount
+
+        agentPrevRewardMap[agent] = reward
+        agentCumulativeRewardMap[agent] += reward
+
 
 
 previousState = initState(fftSize) # S
@@ -113,7 +169,8 @@ staticUserActionMap = {}
 staticUserPrevRewardMap = {}
 staticUserCumulativeRewardMap = {}
 numSaaUsers = 1 # Sense-And-Avoid
-numPpoUsers = 1 #Proximal Policy Optimization
+numPpoUsers = 2 # Proximal Policy Optimization
+ppoUsers = {}
 ppoUserActionMap = {}
 ppoUserPrevRewardMap = {}
 ppoCumulativeRewardMap = {}
@@ -122,17 +179,16 @@ saaUserPrevRewardMap = {}
 saaCumulativeRewardMap = {}
 for saaUser in range(numSaaUsers):
     saaCumulativeRewardMap[saaUser] = 0
+device = "cpu"
 for ppoUser in range(numPpoUsers):
     ppoCumulativeRewardMap[ppoUser] = 0
+    ppo_policy = PPOActorCritic(fftSize).to(device)
+    ppoUsers[ppoUser] = PPOUser(ppo_policy, fftSize, device=device)
 for staticUser in range(numStaticUsers):
     staticUserCumulativeRewardMap[staticUser] = 0
 
-device = "cpu"
 
-ppo_policy = PPOActorCritic(fftSize).to(device)
-ppo_user = PPOUser(ppo_policy, fftSize, device=device)
-
-
+# main loop
 for i in range(memoryBufferSize):
     
     # Generate new actions for static users every 10 steps
@@ -145,9 +201,9 @@ for i in range(memoryBufferSize):
         interval = getLargestDeadSpaceInterval(previousState)
         saaUserActionMap[saaUser] = interval
     
-    if numPpoUsers == 1:
-        ppo_interval = ppo_user.select_action(previousState)
-        ppoUserActionMap[0] = ppo_interval
+    for ppoUser in range(numPpoUsers):
+        ppo_interval = ppoUsers[ppoUser].select_action(previousState)
+        ppoUserActionMap[ppoUser] = ppo_interval
     
     # Update state
     previousState = initState(fftSize)
@@ -159,116 +215,42 @@ for i in range(memoryBufferSize):
         previousState = updateStateInterval(previousState, action)
     
     # Compute reward for static agents
-    for staticUser in range(numStaticUsers):
-        if staticUser not in staticUserActionMap:
-            continue
-        
-        start, stop = staticUserActionMap[staticUser]
-        countTx = stop - start
-        
-        reward = 0
-        if countTx != 0:
-            state = initState(fftSize)
-            
-            for otherUser, interval in staticUserActionMap.items():
-                if otherUser != staticUser:
-                    state = updateStateInterval(state, interval)
-            
-            for interval in ppoUserActionMap.values():
-                state = updateStateInterval(state, interval)
-
-            for interval in saaUserActionMap.values():
-                state = updateStateInterval(state, interval)
-                
-            # compare cogUserActionMap[cogUser] with state to determine reward
-            collisionsCount = computeCollisionsInterval(state, staticUserActionMap[staticUser])
-            
-            # R_spectrum = (B_r - B_widest) - alpha_c * B_c
-            # reward = (countTx - (B_widest[1] - B_widest[0])) - (collisionsCount * collisionWeight)
-            # R_adapt = beta_bw|B_r-u_B_r| + beta_f_c|f_c - u_f_c|
-            
-            # R = R_spectrum - R_adapt
-            # Shane's recommended simpler reward funciton:
-            # R = B_r - alpha_c * B_c
-            reward = countTx - (collisionsCount * collisionWeight)
-        staticUserPrevRewardMap[staticUser] = reward
-        staticUserCumulativeRewardMap[staticUser] += reward
+    computeRewardsForAgents(
+        numAgents=numStaticUsers,
+        agentActionMap=staticUserActionMap,
+        agentPrevRewardMap=staticUserPrevRewardMap,
+        agentCumulativeRewardMap=staticUserCumulativeRewardMap,
+        interferingActionMaps=[ppoUserActionMap, saaUserActionMap],
+        fftSize=fftSize,
+        collisionWeight=collisionWeight
+    )
     
     # Compute reward for SAA agents
-    for saaUser in range(numSaaUsers):
-        if saaUser not in saaUserActionMap or saaUserActionMap[saaUser] == None:
-            continue
-        
-        start, stop = saaUserActionMap[saaUser]
-        countTx = stop - start
-        
-        reward = 0
-        if countTx != 0:
-            state = initState(fftSize)
-            
-            for otherUser, interval in saaUserActionMap.items():
-                if otherUser != saaUser:
-                    state = updateStateInterval(state, interval)
-            
-            for interval in ppoUserActionMap.values():
-                state = updateStateInterval(state, interval)
-
-            for interval in staticUserActionMap.values():
-                state = updateStateInterval(state, interval)
-                
-            # compare cogUserActionMap[cogUser] with state to determine reward
-            collisionsCount = computeCollisionsInterval(state, saaUserActionMap[saaUser])
-            
-            # R_spectrum = (B_r - B_widest) - alpha_c * B_c
-            # R_adapt = beta_bw|B_r-u_B_r| + beta_f_c|f_c - u_f_c|
-            
-            # R = R_spectrum - R_adapt
-            # Shane's recommended simpler reward funciton:
-            # R = B_r - alpha_c * B_c
-            reward = countTx - (collisionsCount * collisionWeight)
-        saaUserPrevRewardMap[saaUser] = reward
-        saaCumulativeRewardMap[saaUser] += reward
+    computeRewardsForAgents(
+        numAgents=numSaaUsers,
+        agentActionMap=saaUserActionMap,
+        agentPrevRewardMap=saaUserPrevRewardMap,
+        agentCumulativeRewardMap=saaCumulativeRewardMap,
+        interferingActionMaps=[ppoUserActionMap, staticUserActionMap],
+        fftSize=fftSize,
+        collisionWeight=collisionWeight
+    )
 
     # Compute reward for PPO agents
-    for ppoUser in range(numPpoUsers):
-        if ppoUser not in ppoUserActionMap:
-            continue
-        
-        start, stop = ppoUserActionMap[ppoUser]
-        countTx = stop - start
-        
-        reward = 0
-        if countTx != 0:
-            state = initState(fftSize)
-            
-            for otherUser, interval in ppoUserActionMap.items():
-                if otherUser != ppoUser:
-                    state = updateStateInterval(state, interval)
-            
-            for interval in saaUserActionMap.values():
-                state = updateStateInterval(state, interval)
+    computeRewardsForAgents(
+        numAgents=numPpoUsers,
+        agentActionMap=ppoUserActionMap,
+        agentPrevRewardMap=ppoUserPrevRewardMap,
+        agentCumulativeRewardMap=ppoCumulativeRewardMap,
+        interferingActionMaps=[saaUserActionMap, staticUserActionMap],
+        fftSize=fftSize,
+        collisionWeight=collisionWeight
+    )
 
-            for interval in staticUserActionMap.values():
-                state = updateStateInterval(state, interval)
-                
-            # compare cogUserActionMap[cogUser] with state to determine reward
-            collisionsCount = computeCollisionsInterval(state, ppoUserActionMap[ppoUser])
-            
-            # R_spectrum = (B_r - B_widest) - alpha_c * B_c
-            # R_adapt = beta_bw|B_r-u_B_r| + beta_f_c|f_c - u_f_c|
-            
-            # R = R_spectrum - R_adapt
-            # Shane's recommended simpler reward funciton:
-            # R = B_r - alpha_c * B_c
-            reward = countTx - (collisionsCount * collisionWeight)
-        
-        ppoUserPrevRewardMap[ppoUser] = reward
-        ppoCumulativeRewardMap[ppoUser] += reward
-
-
+# Print Cumulative Rewards
 for staticUser in range(numStaticUsers):
     print("Static User ", staticUser+1, " Cumulative Reward: ", staticUserCumulativeRewardMap[staticUser])
 for saaUser in range(numSaaUsers):
     print("SAA User ", saaUser+1, " Cumulative Reward: ", saaCumulativeRewardMap[saaUser])
-for ppogUser in range(numPpoUsers):
+for ppoUser in range(numPpoUsers):
     print("PPO User ", ppoUser+1, " Cumulative Reward: ", ppoCumulativeRewardMap[ppoUser])
