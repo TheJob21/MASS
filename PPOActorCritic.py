@@ -1,26 +1,46 @@
 import torch
 import torch.nn as nn
 
-class PPOActorCritic(nn.Module):
-    def __init__(self, fftSize):
+class RecurrentAttentionPPO(nn.Module):
+    def __init__(
+        self,
+        fftSize,
+        d_model=128,
+        num_heads=4,
+        lstm_hidden=84,
+        action_dim=2
+    ):
         super().__init__()
 
-        self.shared = nn.Sequential(
-            nn.Linear(fftSize, 256),
-            nn.ReLU(),
-            nn.Linear(256, 128),
-            nn.ReLU()
+        # Embed full spectrum snapshot
+        self.embedding = nn.Linear(fftSize, d_model)
+
+        # Temporal attention across pulses
+        self.attention = nn.MultiheadAttention(
+            embed_dim=d_model,
+            num_heads=num_heads,
+            batch_first=True
         )
 
-        # Mean of Gaussian policy
-        self.mu = nn.Linear(128, 2)
+        self.lstm = nn.LSTM(
+            input_size=d_model,
+            hidden_size=lstm_hidden,
+            batch_first=True
+        )
 
-        # Log std is learned (paper does this)
-        self.log_std = nn.Parameter(torch.zeros(2))
+        self.mu = nn.Linear(lstm_hidden, action_dim)
+        self.log_std = nn.Parameter(torch.zeros(action_dim))
+        self.value = nn.Linear(lstm_hidden, 1)
 
-        # Value function
-        self.value = nn.Linear(128, 1)
+    def forward(self, obs_seq, hidden_state=None):
+        """
+        obs_seq: (B, 16, 1024)
+        """
+        x = self.embedding(obs_seq)        # (B, 16, d_model)
 
-    def forward(self, state):
-        x = self.shared(state)
-        return self.mu(x), self.log_std, self.value(x)
+        x, _ = self.attention(x, x, x)     # temporal attention
+
+        x, hidden = self.lstm(x, hidden_state)
+        x = x[:, -1]                       # last pulse summary
+
+        return self.mu(x), self.log_std, self.value(x), hidden

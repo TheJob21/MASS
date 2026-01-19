@@ -1,10 +1,12 @@
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
 import numpy as np
-from torch.distributions import Normal
-
-from PPOActorCritic import PPOActorCritic
+from PPOActorCritic import RecurrentAttentionPPO as PPOActorCritic
 from PPOUser import PPOUser
-
-    
+from collections import deque
+import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap, BoundaryNorm
 
 # PPO Agent Parameters
 timeHorizon = 1024 # steps T_h
@@ -66,12 +68,9 @@ def updateStateInterval(previousState, interval):
     previousState[start:stop] = True
     return previousState
 
-def computeCollisionsInterval(previousState, interval):
+def computeCollisions(previousState, interval):
     start, stop = interval
     return np.count_nonzero(previousState[start:stop])
-
-def countTrue(vec: np.ndarray) -> int:
-    return np.count_nonzero(vec)
 
 # Returns action corresponding to longest deadspace of previous state bandwidth
 def getLargestDeadSpaceInterval(prevState):
@@ -103,10 +102,10 @@ def intervalToState(start, stop, fftSize):
     return state
 
 def computeRewardsForAgents(
+    iteration,
     numAgents,
     agentActionMap,
-    agentPrevRewardMap,
-    agentCumulativeRewardMap,
+    agentRewardMap,
     interferingActionMaps,
     fftSize,
     collisionWeight
@@ -149,61 +148,124 @@ def computeRewardsForAgents(
                 for interval in actionMap.values():
                     state = updateStateInterval(state, interval)
 
-            collisionsCount = computeCollisionsInterval(
+            collisionsCount = computeCollisions(
                 state, agentActionMap[agent]
             )
 
             reward = countTx - collisionWeight * collisionsCount
 
-        agentPrevRewardMap[agent] = reward
-        agentCumulativeRewardMap[agent] += reward
+        agentRewardMap[agent][iteration] = reward
 
+def sum_recent_rewards(rewardMap, user, end_t, window=256):
+    """
+    Sum rewards in [end_t - window, end_t)
+    Missing timesteps are treated as 0.
+    """
+    return sum(
+        rewardMap[user].get(t, 0.0)
+        for t in range(end_t - window, end_t)
+        if t >= 0
+    )
+
+def build_labeled_state(
+    fftSize,
+    staticUserActionMap,
+    saaUserActionMap,
+    ppoUserActionMap
+):
+    """
+    Returns an int array of shape (fftSize,)
+    0 = free
+    1 = static1
+    2 = static2
+    3 = static3
+    4 = static4
+    5 = static5
+    6 = SAA1
+    7 = PPO1
+    """
+
+    state = np.zeros(fftSize, dtype=np.int8)
+    i = 1
+    # Static users
+    for interval in staticUserActionMap.values():
+        if interval is not None:
+            s, e = interval
+            state[s:e] = i
+        i = i+1
+
+    # SAA users (overwrite static if collision)
+    for interval in saaUserActionMap.values():
+        if interval is not None:
+            s, e = interval
+            state[s:e] = i
+        i = i+1
+
+    # PPO users (highest priority for visualization)
+    for interval in ppoUserActionMap.values():
+        if interval is not None:
+            s, e = interval
+            state[s:e] = i
+        i = i+1
+
+    # Collision override
+    occupied_counts = np.zeros(fftSize, dtype=int)
+    for m in [staticUserActionMap, saaUserActionMap, ppoUserActionMap]:
+        for interval in m.values():
+            if interval is not None:
+                s, e = interval
+                occupied_counts[s:e] += 1
+
+    state[occupied_counts > 1] = i
+    return state
 
 
 previousState = initState(fftSize) # S
+allStates = deque(maxlen=10000)
+last16States = deque(maxlen=16)
 possibleActions = {} # A
 
 numChannels = 10
 numStaticUsers = 5
 staticUserActionMap = {}
-staticUserPrevRewardMap = {}
-staticUserCumulativeRewardMap = {}
+staticUserRewardMap = {}
 numSaaUsers = 1 # Sense-And-Avoid
-numPpoUsers = 2 # Proximal Policy Optimization
+numPpoUsers = 1 # Proximal Policy Optimization
 ppoUsers = {}
 ppoUserActionMap = {}
-ppoUserPrevRewardMap = {}
-ppoCumulativeRewardMap = {}
+ppoUserRewardMap = {}
 saaUserActionMap = {}
-saaUserPrevRewardMap = {}
-saaCumulativeRewardMap = {}
+saaUserRewardMap = {}
 for saaUser in range(numSaaUsers):
-    saaCumulativeRewardMap[saaUser] = 0
+    saaUserRewardMap[saaUser] = {}
 device = "cpu"
 for ppoUser in range(numPpoUsers):
-    ppoCumulativeRewardMap[ppoUser] = 0
+    ppoUserRewardMap[ppoUser] = {}
     ppo_policy = PPOActorCritic(fftSize).to(device)
     ppoUsers[ppoUser] = PPOUser(ppo_policy, fftSize, device=device)
 for staticUser in range(numStaticUsers):
-    staticUserCumulativeRewardMap[staticUser] = 0
+    staticUserRewardMap[staticUser] = {}
 
 
 # main loop
-for i in range(memoryBufferSize):
+for i in range(10_000): # 10 sec. 1 = 12.8 microseconds
     
-    # Generate new actions for static users every 10 steps
-    if i % 10 == 0:
+    # Generate new actions for static users
+    if i % 500 == 0:
         for staticUser in range(numStaticUsers):
             staticUserActionMap[staticUser] = randomAction(fftSize)
     
     # Generate actions for cognitive users
-    for saaUser in range(numSaaUsers):
-        interval = getLargestDeadSpaceInterval(previousState)
-        saaUserActionMap[saaUser] = interval
+    if i % 16 == 0:
+        for saaUser in range(numSaaUsers):
+            interval = getLargestDeadSpaceInterval(previousState)
+            saaUserActionMap[saaUser] = interval
     
-    for ppoUser in range(numPpoUsers):
-        ppo_interval = ppoUsers[ppoUser].select_action(previousState)
-        ppoUserActionMap[ppoUser] = ppo_interval
+    if i % 16 == 0 and len(last16States) == 16: # every 204.8 usec
+        obs_seq = np.stack(last16States)   # (T, F)
+        for ppoUser in range(numPpoUsers):
+            ppo_interval = ppoUsers[ppoUser].select_action(obs_seq)
+            ppoUserActionMap[ppoUser] = ppo_interval
     
     # Update state
     previousState = initState(fftSize)
@@ -213,13 +275,21 @@ for i in range(memoryBufferSize):
         previousState = updateStateInterval(previousState, action)
     for action in ppoUserActionMap.values():
         previousState = updateStateInterval(previousState, action)
+    labeled_state = build_labeled_state(
+        fftSize,
+        staticUserActionMap,
+        saaUserActionMap,
+        ppoUserActionMap
+    )
+    allStates.append(labeled_state)
+    last16States.append(previousState.astype(float))
     
     # Compute reward for static agents
     computeRewardsForAgents(
+        iteration=i,
         numAgents=numStaticUsers,
         agentActionMap=staticUserActionMap,
-        agentPrevRewardMap=staticUserPrevRewardMap,
-        agentCumulativeRewardMap=staticUserCumulativeRewardMap,
+        agentRewardMap=staticUserRewardMap,
         interferingActionMaps=[ppoUserActionMap, saaUserActionMap],
         fftSize=fftSize,
         collisionWeight=collisionWeight
@@ -227,10 +297,10 @@ for i in range(memoryBufferSize):
     
     # Compute reward for SAA agents
     computeRewardsForAgents(
+        iteration=i,
         numAgents=numSaaUsers,
         agentActionMap=saaUserActionMap,
-        agentPrevRewardMap=saaUserPrevRewardMap,
-        agentCumulativeRewardMap=saaCumulativeRewardMap,
+        agentRewardMap=saaUserRewardMap,
         interferingActionMaps=[ppoUserActionMap, staticUserActionMap],
         fftSize=fftSize,
         collisionWeight=collisionWeight
@@ -238,19 +308,89 @@ for i in range(memoryBufferSize):
 
     # Compute reward for PPO agents
     computeRewardsForAgents(
+        iteration=i,
         numAgents=numPpoUsers,
         agentActionMap=ppoUserActionMap,
-        agentPrevRewardMap=ppoUserPrevRewardMap,
-        agentCumulativeRewardMap=ppoCumulativeRewardMap,
+        agentRewardMap=ppoUserRewardMap,
         interferingActionMaps=[saaUserActionMap, staticUserActionMap],
         fftSize=fftSize,
         collisionWeight=collisionWeight
     )
+    
+    if i % 16 == 0 and len(last16States) == 16: # every 204.8 usec
+        for ppoUser in range(numPpoUsers):
+            pulse_reward = sum_recent_rewards(
+                ppoUserRewardMap,
+                ppoUser,
+                i,
+                window=16
+            ) / 16
 
+            ppoUsers[ppoUser].store_reward(
+                pulse_reward,
+                done=False
+            )
+            ppoUsers[ppoUser].update()
+    
 # Print Cumulative Rewards
 for staticUser in range(numStaticUsers):
-    print("Static User ", staticUser+1, " Cumulative Reward: ", staticUserCumulativeRewardMap[staticUser])
+    print("Static User ", staticUser+1, " Cumulative Reward: ", sum(staticUserRewardMap[staticUser].values()))
 for saaUser in range(numSaaUsers):
-    print("SAA User ", saaUser+1, " Cumulative Reward: ", saaCumulativeRewardMap[saaUser])
+    print("SAA User ", saaUser+1, " Cumulative Reward: ", sum(saaUserRewardMap[saaUser].values()))
 for ppoUser in range(numPpoUsers):
-    print("PPO User ", ppoUser+1, " Cumulative Reward: ", ppoCumulativeRewardMap[ppoUser])
+    print("PPO User ", ppoUser+1, " Cumulative Reward: ", sum(ppoUserRewardMap[ppoUser].values()))
+    
+    
+stateMatrix = np.stack(allStates)
+
+colors = [
+    "#f0f0f0",  # 0: Free (default background)
+    "#1f77b4",  # 1: Static (blue)
+    "#1f77b4",  # 1: Static (blue)
+    "#1f77b4",  # 1: Static (blue)
+    "#1f77b4",  # 1: Static (blue)
+    "#1f77b4",  # 1: Static (blue)
+    "#2ca02c",  # 2: SAA (green)
+    "#FFFF00",  # 3: PPO (yellow)
+#    "#ff7f0e",  # 3: PPO (orange)
+    "#d62728",  # 4: Collision (red)
+]
+
+cmap = ListedColormap(colors)
+
+bounds = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]#, 10]
+norm = BoundaryNorm(bounds, cmap.N)
+
+plt.figure(figsize=(14,6))
+im = plt.imshow(
+    stateMatrix,
+    aspect="auto",
+    origin="lower",
+    cmap=cmap,
+    norm=norm
+)
+im.format_cursor_data = lambda _: ""
+plt.xlabel("Frequency Bin")
+plt.ylabel("Time Step")
+plt.title("Spectrum Occupancy Over Time by Agent")
+cbar = plt.colorbar(ticks=[0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5])#, 9.5])
+cbar.ax.set_yticklabels(["Free", "Static1", "Static2", "Static3", "Static4", "Static5", "SAA", "PPO1", "Collision"])
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(6, 12))
+
+for ppoUser in range(numPpoUsers):
+    rewards = [
+        ppoUserRewardMap[ppoUser].get(t, 0)
+        for t in range(len(allStates))
+    ]
+    plt.plot(rewards, label=f"PPO User {ppoUser+1}")
+
+plt.xlabel("Time Step")
+plt.ylabel("Reward")
+plt.title("PPO Reward Over Time")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
