@@ -108,7 +108,8 @@ def computeRewardsForAgents(
     agentRewardMap,
     interferingActionMaps,
     fftSize,
-    collisionWeight
+    collisionWeight,
+    previousState
 ):
     """
     Generic reward computation for any agent group.
@@ -126,7 +127,8 @@ def computeRewardsForAgents(
     interferingActionMaps : list[dict]
         Other agents' action maps that cause interference
     """
-
+    B_widest = getLargestDeadSpaceInterval(previousState)
+    
     for agent in range(numAgents):
         if agent not in agentActionMap or agentActionMap[agent] is None:
             continue
@@ -152,7 +154,8 @@ def computeRewardsForAgents(
                 state, agentActionMap[agent]
             )
 
-            reward = countTx - collisionWeight * collisionsCount
+            # transmitted - widest open bandwidth - collisionCount*collisionWeight(0-1)
+            reward = (countTx - (B_widest[1] - B_widest[0])) - collisionWeight * collisionsCount
 
         agentRewardMap[agent][iteration] = reward
 
@@ -229,7 +232,7 @@ numChannels = 10
 numStaticUsers = 5
 staticUserActionMap = {}
 staticUserRewardMap = {}
-numSaaUsers = 1 # Sense-And-Avoid
+numSaaUsers = 0 # Sense-And-Avoid
 numPpoUsers = 1 # Proximal Policy Optimization
 ppoUsers = {}
 ppoUserActionMap = {}
@@ -246,14 +249,20 @@ for ppoUser in range(numPpoUsers):
 for staticUser in range(numStaticUsers):
     staticUserRewardMap[staticUser] = {}
 
-
-# main loop
-for i in range(10_000): # 10 sec. 1 = 12.8 microseconds
+staticActionMapToggle = {}
+for staticUser in range(numStaticUsers):
+    staticActionMapToggle[staticUser] = randomAction(fftSize)
     
-    # Generate new actions for static users
-    if i % 500 == 0:
+# main loop
+for i in range(1_000_000): # 10 sec. 1 = 12.8 microseconds
+    
+    # Toggle static user actions on/off
+    if i % 1000 == 0:
         for staticUser in range(numStaticUsers):
-            staticUserActionMap[staticUser] = randomAction(fftSize)
+            staticUserActionMap[staticUser] = staticActionMapToggle[staticUser]
+    elif i % 1000 == 500:
+        for staticUser in range(numStaticUsers):
+            staticUserActionMap[staticUser] = None
     
     # Generate actions for cognitive users
     if i % 16 == 0:
@@ -292,7 +301,8 @@ for i in range(10_000): # 10 sec. 1 = 12.8 microseconds
         agentRewardMap=staticUserRewardMap,
         interferingActionMaps=[ppoUserActionMap, saaUserActionMap],
         fftSize=fftSize,
-        collisionWeight=collisionWeight
+        collisionWeight=collisionWeight,
+        previousState=previousState
     )
     
     # Compute reward for SAA agents
@@ -303,7 +313,8 @@ for i in range(10_000): # 10 sec. 1 = 12.8 microseconds
         agentRewardMap=saaUserRewardMap,
         interferingActionMaps=[ppoUserActionMap, staticUserActionMap],
         fftSize=fftSize,
-        collisionWeight=collisionWeight
+        collisionWeight=collisionWeight,
+        previousState=previousState
     )
 
     # Compute reward for PPO agents
@@ -314,7 +325,8 @@ for i in range(10_000): # 10 sec. 1 = 12.8 microseconds
         agentRewardMap=ppoUserRewardMap,
         interferingActionMaps=[saaUserActionMap, staticUserActionMap],
         fftSize=fftSize,
-        collisionWeight=collisionWeight
+        collisionWeight=collisionWeight,
+        previousState=previousState
     )
     
     if i % 16 == 0 and len(last16States) == 16: # every 204.8 usec
@@ -358,7 +370,7 @@ colors = [
 
 cmap = ListedColormap(colors)
 
-bounds = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]#, 10]
+bounds = [0, 1, 2, 3, 4, 5, 6, 7, 8]#, 9]#, 10]
 norm = BoundaryNorm(bounds, cmap.N)
 
 plt.figure(figsize=(14,6))
@@ -373,8 +385,8 @@ im.format_cursor_data = lambda _: ""
 plt.xlabel("Frequency Bin")
 plt.ylabel("Time Step")
 plt.title("Spectrum Occupancy Over Time by Agent")
-cbar = plt.colorbar(ticks=[0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5])#, 9.5])
-cbar.ax.set_yticklabels(["Free", "Static1", "Static2", "Static3", "Static4", "Static5", "SAA", "PPO1", "Collision"])
+cbar = plt.colorbar(ticks=[0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5])#, 8.5])#, 9.5])
+cbar.ax.set_yticklabels(["Free", "Static1", "Static2", "Static3", "Static4", "Static5", "PPO1", "Collision"])
 plt.tight_layout()
 plt.show()
 
