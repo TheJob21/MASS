@@ -3,14 +3,17 @@ from ReplayBuffer import ReplayBuffer
 import torch
 import torch.nn as nn
 import numpy as np
+from CognitiveAgent import CognitiveAgent
 
-class DQNUser:
-    def __init__(self, fftSize, action_list, device="cpu"):
-        self.actions = action_list
+class DQNAgent(CognitiveAgent):
+    def __init__(self, actionList, currentAction=None, fftSize=1024, cpiLen=256, device="cpu"):
+        super().__init__(currentAction, fftSize, cpiLen)
+        
+        self.actions = actionList
         self.device = device
 
-        self.policy = SpectrumDQN(fftSize, len(action_list)).to(device)
-        self.target = SpectrumDQN(fftSize, len(action_list)).to(device)
+        self.policy = SpectrumDQN(fftSize, len(actionList)).to(device)
+        self.target = SpectrumDQN(fftSize, len(actionList)).to(device)
         self.target.load_state_dict(self.policy.state_dict())
 
         self.buffer = ReplayBuffer()

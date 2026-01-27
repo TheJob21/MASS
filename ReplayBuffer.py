@@ -1,6 +1,7 @@
 from collections import deque
 import random
 import torch
+import numpy as np
 
 class ReplayBuffer:
     def __init__(self, capacity=20000):
@@ -12,13 +13,15 @@ class ReplayBuffer:
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
         s, a, r, s2, d = zip(*batch)
+
         return (
-            torch.tensor(s, dtype=torch.float32),
-            torch.tensor(a, dtype=torch.long),
-            torch.tensor(r, dtype=torch.float32),
-            torch.tensor(s2, dtype=torch.float32),
-            torch.tensor(d, dtype=torch.float32)
+            torch.from_numpy(np.asarray(s, dtype=np.float32)),
+            torch.from_numpy(np.asarray(a, dtype=np.int64)),
+            torch.from_numpy(np.asarray(r, dtype=np.float32)),
+            torch.from_numpy(np.asarray(s2, dtype=np.float32)),
+            torch.from_numpy(np.asarray(d, dtype=np.float32)),
         )
+
 
     def __len__(self):
         return len(self.buffer)

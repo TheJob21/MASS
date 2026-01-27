@@ -3,9 +3,9 @@ import torch.nn.functional as F
 import numpy as np
 from torch.distributions import Normal
 from PPOActorCritic import RecurrentAttentionPPO
+from CognitiveAgent import CognitiveAgent
 
-
-def continuous_action_to_interval(center, bandwidth, fftSize):
+def continuous_action_to_interval(center, bandwidth, fftSize=1024):
     bw_bins = int(bandwidth * fftSize)
     bw_bins = np.clip(bw_bins, 30, 102)
 
@@ -15,21 +15,27 @@ def continuous_action_to_interval(center, bandwidth, fftSize):
     return start, stop
 
 
-class PPOUser:
-    def __init__(
-        self,
-        policy: RecurrentAttentionPPO,
-        fftSize,
+class PPOAgent(CognitiveAgent):
+    def __init__(self, 
+        currentAction=None, 
+        fftSize=1024, 
+        cpiLen=256,
+        policy: RecurrentAttentionPPO=None,
         device="cpu",
-        gamma=0.99,
+        gamma=0.8,
         lam=0.95,
         clip_eps=0.2,
-        lr=3e-4,
+        lr=2.5e-4,
         num_epochs=10,
-        entropy_coef=0.01
+        entropy_coef=0.01,
+        horizon=1024
     ):
-        self.policy = policy.to(device)
-        self.fftSize = fftSize
+        super().__init__(currentAction, fftSize, cpiLen)
+        if policy == None:
+            self.policy = RecurrentAttentionPPO(fftSize).to(device)
+        else:
+            self.policy = policy.to(device)
+        
         self.device = device
 
         self.gamma = gamma
@@ -37,7 +43,7 @@ class PPOUser:
         self.clip_eps = clip_eps
         self.num_epochs = num_epochs
         self.entropy_coef = entropy_coef
-
+        self.horizon = horizon
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=lr)
 
         # Rollout buffers
@@ -76,26 +82,26 @@ class PPOUser:
             center, bandwidth, self.fftSize
         )
 
-        # ---- CRITICAL FIX: detach rollout data ----
         self.states.append(state.squeeze(0).detach())        # (16, 1024)
         self.actions.append(action.detach())                 # (2,)
         self.log_probs.append(log_prob.detach())             # ()
         self.values.append(value.squeeze(-1).detach())       # ()
 
-        return (start, stop)
+        self.currentAction = (start, stop)
 
     def store_reward(self, reward, done=False):
         self.rewards.append(float(reward))
         self.dones.append(done)
 
     def update(self):
-        if len(self.states) == 0:
+        if len(self.rewards) < self.horizon:
             return
 
-        states = torch.stack(self.states)          # (B, 16, 1024)
-        actions = torch.stack(self.actions)        # (B, 2)
-        old_log_probs = torch.stack(self.log_probs)
-        values = torch.stack(self.values)
+        # ---------- Stack buffers ----------
+        states = torch.stack(self.states)          # (H, 16, 1024)
+        actions = torch.stack(self.actions)        # (H, action_dim)
+        old_log_probs = torch.stack(self.log_probs)  # (H,)
+        values = torch.stack(self.values).view(-1).detach()  # (H,)
 
         rewards = self.rewards
         dones = self.dones
@@ -106,10 +112,14 @@ class PPOUser:
         next_value = 0.0
 
         for t in reversed(range(len(rewards))):
-            delta = rewards[t] + self.gamma * next_value * (1 - dones[t]) - values[t]
+            delta = (
+                rewards[t]
+                + self.gamma * next_value * (1 - dones[t])
+                - values[t].item()
+            )
             gae = delta + self.gamma * self.lam * (1 - dones[t]) * gae
             advantages.insert(0, gae)
-            next_value = values[t]
+            next_value = values[t].item()
 
         advantages = torch.tensor(
             advantages, dtype=torch.float32, device=self.device
@@ -140,7 +150,7 @@ class PPOUser:
             policy_loss = -torch.min(surr1, surr2).mean()
             value_loss = F.mse_loss(
                 value_preds.view(-1),
-                returns.view(-1)
+                returns
             )
             entropy = dist.entropy().sum(dim=-1).mean()
 
@@ -151,7 +161,7 @@ class PPOUser:
             torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
             self.optimizer.step()
 
-        # Clear buffers
+        # ---------- Clear buffers ----------
         self.states.clear()
         self.actions.clear()
         self.log_probs.clear()
