@@ -7,6 +7,7 @@ from StaticAgent import StaticAgent
 from SAAAgent import SAAAgent
 from PPOAgent import PPOAgent
 from DQNAgent import DQNAgent
+from RandomStartAgent import RandomStartAgent
 from collections import deque
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
@@ -166,45 +167,22 @@ def sum_recent_rewards(rewardMap, end_t, window=256):
     )
 
 def build_labeled_state(
-    staticAgentActions,
-    saaAgentActions,
-    ppoAgentActions,
-    dqnAgentActions,
+    listOfActionsLists,
     fftSize=1024
 ):
     state = np.zeros(fftSize, dtype=np.int8)
     i = 1 # 0 represents empty
-    # Static Agents
-    for interval in staticAgentActions:
-        if interval is not None:
-            s, e = interval
-            state[s:e] = i
-        i = i+1
-
-    # SAA Agents
-    for interval in saaAgentActions:
-        if interval is not None:
-            s, e = interval
-            state[s:e] = i
-        i = i+1
-        
-    # PPO Agents
-    for interval in ppoAgentActions:
-        if interval is not None:
-            s, e = interval
-            state[s:e] = i
-        i = i+1
-
-    # DQN Agents
-    for interval in dqnAgentActions:
-        if interval is not None:
-            s, e = interval
-            state[s:e] = i
-        i = i+1
+    
+    for actionsList in listOfActionsLists:
+        for interval in actionsList:
+            if interval is not None:
+                s, e = interval
+                state[s:e] = i
+            i = i+1
 
     # Collision override
     occupied_counts = np.zeros(fftSize, dtype=int)
-    for m in [staticAgentActions, saaAgentActions, ppoAgentActions, dqnAgentActions]:
+    for m in listOfActionsLists:
         for interval in m:
             if interval is not None:
                 s, e = interval
@@ -266,11 +244,17 @@ for dqnAgent in range(numDqnAgents):
     dqnAgents.append(DQNAgent(fftSize=fftSize, actionList=DQN_ACTIONS, cpiLen=cpiLen, device=device))
 
 # Static Agents For Simulating Environment
-numStaticAgents = 10
+numStaticAgents = 6
 staticAgents = []
 for staticAgent in range(numStaticAgents):
     staticAgents.append(StaticAgent())
-    
+
+# Random Single Action Agent
+numRandomStartAgents = 1
+randomStartAgents = []
+for randAgent in range(numRandomStartAgents):
+    randomStartAgents.append(RandomStartAgent())
+
 # SAA Agent Parameters
 numSaaAgents = 1 # Sense-And-Avoid
 saaAgents = []
@@ -285,7 +269,7 @@ for ppoAgent in range(numPpoAgents):
 
 
 # main loop
-for i in range(2_000_000): # 1 = 12.8 microseconds
+for i in range(350_000): # 1 = 12.8 microseconds
     if i % 100_000 == 0:
         print(i, " iterations completed.")
     
@@ -327,6 +311,8 @@ for i in range(2_000_000): # 1 = 12.8 microseconds
     previousState = initState(fftSize)
     for staticAgent in staticAgents:
         previousState = updateStateInterval(previousState, staticAgent.currentAction)
+    for randomStartAgent in randomStartAgents:
+        previousState = updateStateInterval(previousState, randomStartAgent.currentAction)
     for saaAgent in saaAgents:
         previousState = updateStateInterval(previousState, saaAgent.currentAction)
     for ppoAgent in ppoAgents:
@@ -334,33 +320,41 @@ for i in range(2_000_000): # 1 = 12.8 microseconds
     for dqnAgent in dqnAgents:
         previousState = updateStateInterval(previousState, dqnAgent.currentAction)
     labeled_state = build_labeled_state(
-        [agent.currentAction for agent in staticAgents],
+        listOfActionsLists=[[agent.currentAction for agent in staticAgents],
+        [agent.currentAction for agent in randomStartAgents],
         [agent.currentAction for agent in saaAgents],
         [agent.currentAction for agent in ppoAgents],
-        [agent.currentAction for agent in dqnAgents],
-        fftSize
+        [agent.currentAction for agent in dqnAgents]],
+        fftSize=fftSize
     )
     allStates.append(labeled_state)
     last16States.append(previousState.astype(float))
     
-    # Compute reward for SAA agents
+    # Compute reward for Random Start agents
     computeRewardsForAgents(
-        cognitiveAgents=saaAgents,
-        interferingActionMaps=[[a.currentAction for a in ppoAgents], [a.currentAction for a in staticAgents], [a.currentAction for a in dqnAgents]],
+        cognitiveAgents=randomStartAgents,
+        interferingActionMaps=[[a.currentAction for a in staticAgents], [a.currentAction for a in saaAgents], [a.currentAction for a in ppoAgents], [a.currentAction for a in dqnAgents]],
         currentState=previousState
     )
 
+    # Compute reward for SAA agents
+    computeRewardsForAgents(
+        cognitiveAgents=saaAgents,
+        interferingActionMaps=[[a.currentAction for a in staticAgents], [a.currentAction for a in randomStartAgents], [a.currentAction for a in ppoAgents], [a.currentAction for a in dqnAgents]],
+        currentState=previousState
+    )
+    
     # Compute reward for PPO agents
     computeRewardsForAgents(
         cognitiveAgents=ppoAgents,
-        interferingActionMaps=[[a.currentAction for a in saaAgents], [a.currentAction for a in staticAgents], [a.currentAction for a in dqnAgents]],
+        interferingActionMaps=[[a.currentAction for a in staticAgents], [a.currentAction for a in randomStartAgents], [a.currentAction for a in saaAgents], [a.currentAction for a in dqnAgents]],
         currentState=previousState
     )
         
     # Compute reward for DQN agents
     computeRewardsForAgents(
         cognitiveAgents=dqnAgents,
-        interferingActionMaps=[[a.currentAction for a in saaAgents], [a.currentAction for a in staticAgents], [a.currentAction for a in ppoAgents]],
+        interferingActionMaps=[[a.currentAction for a in staticAgents], [a.currentAction for a in randomStartAgents], [a.currentAction for a in saaAgents], [a.currentAction for a in ppoAgents]],
         currentState=previousState
     )
     
@@ -400,6 +394,8 @@ for i in range(2_000_000): # 1 = 12.8 microseconds
             dqnAgent.target.load_state_dict(dqnAgent.policy.state_dict())
 
 # Print Cumulative Rewards
+for randomStartAgent in range(numRandomStartAgents):
+    print("Random Start Agent ", randomStartAgent+1, " Cumulative Reward: ", sum(randomStartAgents[randomStartAgent].allRewards))
 for saaAgent in range(numSaaAgents):
     print("SAA Agent ", saaAgent+1, " Cumulative Reward: ", sum(saaAgents[saaAgent].allRewards))
 for ppoAgent in range(numPpoAgents):
@@ -411,7 +407,7 @@ for dqnAgent in range(numDqnAgents):
 stateMatrix = np.stack(allStates)
 
 colors = []
-colorCount = numStaticAgents + numSaaAgents + numPpoAgents + numDqnAgents + 2
+colorCount = numStaticAgents + numRandomStartAgents + numSaaAgents + numPpoAgents + numDqnAgents + 2
 
 cmap = build_agent_colormap(colorCount)
 bounds = []
@@ -438,13 +434,15 @@ cbar = plt.colorbar(ticks=ticks)
 tickLabels = []
 tickLabels.append("Free")
 for staticAgent in range(numStaticAgents):
-    tickLabels.append("Static " + str(staticAgent))
+    tickLabels.append("Static " + str(staticAgent + 1))
+for randomStartAgent in range(numRandomStartAgents):
+    tickLabels.append("Random Start Agent " + str(randomStartAgent + 1))    
 for saaAgent in range(numSaaAgents):
-    tickLabels.append("SAA " + str(saaAgent))
+    tickLabels.append("SAA " + str(saaAgent + 1))
 for ppoAgent in range(numPpoAgents):
-    tickLabels.append("PPO " + str(ppoAgent))
+    tickLabels.append("PPO " + str(ppoAgent + 1))
 for dqnAgent in range(numDqnAgents):
-    tickLabels.append("DQN " + str(dqnAgent))
+    tickLabels.append("DQN " + str(dqnAgent + 1))
 tickLabels.append("Collision")
 
 cbar.ax.set_yticklabels(tickLabels)
@@ -452,29 +450,64 @@ plt.tight_layout()
 plt.show()
 
 
-plt.figure(figsize=(12, 12))
-for dqnAgent in range(numDqnAgents):
-    # rewards = [
-    #     dqnAgents[dqnAgent].allRewards.get(t, 0)
-    #     for t in range(len(allStates))
-    # ]
-    plt.plot(dqnAgents[dqnAgent].allRewards, label=f"DQN Agent {dqnAgent+1}")
-for saaAgent in range(numSaaAgents):
-    # rewards = [
-    #     saaAgents[saaAgent].allRewards.get(t, 0)
-    #     for t in range(len(allStates))
-    # ]
-    plt.plot(saaAgents[saaAgent].allRewards, label=f"SAA Agent {saaAgent+1}")
-for ppoAgent in range(numPpoAgents):
-    # rewards = [
-    #     ppoAgent.allRewards.get(t, 0)
-    #     for t in range(len(allStates))
-    # ]
-    plt.plot(ppoAgents[ppoAgent].allRewards, label=f"PPO Agent {ppoAgent+1}")
+def mean_std_every_n(rewards, n=4096):
+    rewards = np.asarray(rewards)
+    usable_len = (len(rewards) // n) * n
+    blocks = rewards[:usable_len].reshape(-1, n)
+    mean = blocks.mean(axis=1)
+    std = blocks.std(axis=1)
+    x = np.arange(len(mean)) * n
+    return x, mean, std
 
+plt.figure(figsize=(12, 8))
+block = 4096
+
+for randomStartAgent in range(numRandomStartAgents):
+    x, mean, _ = mean_std_every_n(randomStartAgents[randomStartAgent].allRewards, block)
+    plt.plot(x, mean, label=f"Random Start Agent {randomStartAgent+1}")
+    
+for saaAgent in range(numSaaAgents):
+    x, mean, _ = mean_std_every_n(saaAgents[saaAgent].allRewards, block)
+    plt.plot(x, mean, label=f"SAA Agent {saaAgent+1}")
+
+for ppoAgent in range(numPpoAgents):
+    x, mean, _ = mean_std_every_n(ppoAgents[ppoAgent].allRewards, block)
+    plt.plot(x, mean, label=f"PPO Agent {ppoAgent+1}")
+
+for dqnAgent in range(numDqnAgents):
+    x, mean, _ = mean_std_every_n(dqnAgents[dqnAgent].allRewards, block)
+    plt.plot(x, mean, label=f"DQN Agent {dqnAgent+1}")
+    
 plt.xlabel("Time Step")
-plt.ylabel("Reward")
-plt.title("PPO Reward Over Time")
+plt.ylabel("Mean Reward (per 4096 steps)")
+plt.title("Mean Reward Over Time (Per Agent)")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(12, 8))
+block = 4096
+
+for randomStartAgent in range(numRandomStartAgents):
+    x, _, std = mean_std_every_n(randomStartAgents[randomStartAgent].allRewards, block)
+    plt.plot(x, std, label=f"Random Start Agent {randomStartAgent+1}")
+
+for saaAgent in range(numSaaAgents):
+    x, _, std = mean_std_every_n(saaAgents[saaAgent].allRewards, block)
+    plt.plot(x, std, label=f"SAA Agent {saaAgent+1}")
+
+for ppoAgent in range(numPpoAgents):
+    x, _, std = mean_std_every_n(ppoAgents[ppoAgent].allRewards, block)
+    plt.plot(x, std, label=f"PPO Agent {ppoAgent+1}")
+
+for dqnAgent in range(numDqnAgents):
+    x, _, std = mean_std_every_n(dqnAgents[dqnAgent].allRewards, block)
+    plt.plot(x, std, label=f"DQN Agent {dqnAgent+1}")
+    
+plt.xlabel("Time Step")
+plt.ylabel("Reward Std Dev (per 4096 steps)")
+plt.title("Reward Variability Over Time (Per Agent)")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
