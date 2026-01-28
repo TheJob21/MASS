@@ -21,13 +21,15 @@ gaeParameter = 0.95 # lambda
 policyClipFraction = 0.2 # epsilon
 numGradientEpochs = 10
 learningRate = 0.00025
-collisionWeight = 20 # 0 - 30 alpha_c
+collisionWeight = 25 # 0 - 30 alpha_c
 bandwidthDistortionFactor = 0.2 # 0 - 1 Beta_bw
-centerDistortionFactor = 1 # 0 - 1 Beta_f_c
+centerDistortionFactor = 0.7 # 0 - 1 Beta_f_c
 
 # Radar system parameters
+startingFrequency = 2400 # MHz
 channelBandwidth = 100 # MHz
 fftSize = 1024 # samples
+binSize = channelBandwidth / fftSize # MHz
 pri = 204.8 # usec
 cpiLen = 256 # pulses
 hoCaeWindowSize = 64 # n  the Hardware-Optimized Cell Averaging Estimation (HO-CAE)
@@ -141,13 +143,18 @@ def computeRewardsForAgents(
                 
             rewardSpectrum = (countTx - widestOpenBandwidth) - (collisionWeight * collisionsCount)
             
+            # Store Collision amount
+            cogAgent.collisions.append(collisionsCount*binSize)
+            
             rewardAdapt = 0
             prevAgentActionsArr = np.array(cogAgent.previousActions)
             if len(prevAgentActionsArr) != 0:
                 avgCenterFreq = prevAgentActionsArr[:, 0].mean()
                 avgBW = prevAgentActionsArr[:, 1].mean()
                 agentCenterFreq, agentBW = intervalToCenterFreqBW(currAction)
-                rewardAdapt = (bandwidthDistortionFactor * abs(agentBW - avgBW)) + (centerDistortionFactor * abs(agentCenterFreq - avgCenterFreq))
+                deltaBW = abs(agentBW - avgBW)
+                deltaCenterFreq = abs(agentCenterFreq - avgCenterFreq)
+                rewardAdapt = (bandwidthDistortionFactor * deltaBW) + (centerDistortionFactor * deltaCenterFreq)
             
             reward = rewardSpectrum - rewardAdapt
             
@@ -187,6 +194,10 @@ def build_labeled_state(
 
     # Collision override
     occupied_counts = np.zeros(fftSize, dtype=int)
+    for interval in staticActionsLists:
+        if interval is not None:
+            s, e = interval
+            occupied_counts[s:e] += 1
     for m in listOfActionsLists:
         for interval in m:
             if interval is not None:
@@ -225,12 +236,14 @@ def build_agent_colormap(n_colors):
     return ListedColormap(colors)
 
 def intervalToCenterFreqBW(interval):
-    intervalBW = (interval[1] - interval[0]) / 2
-    return (interval[0] + intervalBW, intervalBW)
+    intervalBW = binSize * (interval[1] - interval[0]) / 2 # MHz
+    centerFreq = startingFrequency + ((binSize * interval[0]) + intervalBW) # MHz
+    return (centerFreq, intervalBW)
 
 previousState = initState(fftSize) # S
 allStates = deque(maxlen=10000)
 last16States = deque(maxlen=16)
+deadspace = [] # MHz
 device = "cpu"
 
 # DQN Agent Parameters
@@ -249,7 +262,7 @@ for dqnAgent in range(numDqnAgents):
     dqnAgents.append(DQNAgent(fftSize=fftSize, actionList=DQN_ACTIONS, cpiLen=cpiLen, device=device))
 
 # Static Agents For Simulating Environment
-numStaticAgents = 6
+numStaticAgents = 10
 staticAgents = []
 for staticAgent in range(numStaticAgents):
     staticAgents.append(StaticAgent())
@@ -294,14 +307,18 @@ for i in range(2_000_000): # 1 = 12.8 microseconds
         for saaAgent in saaAgents:
             interval = getLargestDeadSpaceInterval(previousState)
             saaAgent.currentAction = interval
-            saaAgent.previousActions.append(intervalToCenterFreqBW(interval))
+            action = intervalToCenterFreqBW(interval)
+            saaAgent.previousActions.append(action)
+            saaAgent.allActions.append(action)
     
     # Generate actions for PPO agents
     if i % 16 == 0 and len(last16States) == 16: # every 204.8 usec
         obs_seq = np.stack(last16States)   # (T, F)
         for ppoAgent in ppoAgents:
             ppoAgent.select_action(obs_seq)
-            ppoAgent.previousActions.append(intervalToCenterFreqBW(ppoAgent.currentAction))
+            action = intervalToCenterFreqBW(ppoAgent.currentAction)
+            ppoAgent.previousActions.append(action)
+            ppoAgent.allActions.append(action)
     
     # Generate actions for DQN agents
     state_t = previousState.astype(np.float32)
@@ -310,7 +327,9 @@ for i in range(2_000_000): # 1 = 12.8 microseconds
             action_idx = dqnAgent.select_action(state_t)
             interval = DQN_ACTIONS[action_idx]
             dqnAgent.currentAction = interval
-            dqnAgent.previousActions.append(intervalToCenterFreqBW(interval))
+            action = intervalToCenterFreqBW(interval)
+            dqnAgent.previousActions.append(action)
+            dqnAgent.allActions.append(action)
 
     # Update state
     previousState = initState(fftSize)
@@ -335,6 +354,11 @@ for i in range(2_000_000): # 1 = 12.8 microseconds
     )
     allStates.append(labeled_state)
     last16States.append(previousState.astype(float))
+    deadSpaceInterval = getLargestDeadSpaceInterval(previousState)
+    if deadSpaceInterval == None:
+       deadspace.append(0)
+    else: 
+        deadspace.append((deadSpaceInterval[1] - deadSpaceInterval[0]) * binSize)
     
     # Compute reward for Random Start agents
     computeRewardsForAgents(
@@ -409,7 +433,8 @@ for ppoAgent in range(numPpoAgents):
 for dqnAgent in range(numDqnAgents):
     print("DQN Agent ", dqnAgent+1, " Cumulative Reward: ", sum(dqnAgents[dqnAgent].allRewards))
        
-    
+
+# Spectrum Usage and collisions per agent over time 
 stateMatrix = np.stack(allStates)
 
 colors = []
@@ -434,15 +459,13 @@ im = plt.imshow(
 )
 im.format_cursor_data = lambda _: ""
 plt.xlabel("Frequency Bin")
-plt.ylabel("Time Step")
+plt.ylabel("Time Step (1 time step = 12.8 usec)")
 plt.title("Spectrum Occupancy Over Time by Agent")
 cbar = plt.colorbar(ticks=ticks)
 tickLabels = []
 tickLabels.append("Free")
 # One color for all static agents
 tickLabels.append("Static Agents")
-# for staticAgent in range(numStaticAgents):
-#     tickLabels.append("Static " + str(staticAgent + 1))
 for randomStartAgent in range(numRandomStartAgents):
     tickLabels.append("Random Start Agent " + str(randomStartAgent + 1))    
 for saaAgent in range(numSaaAgents):
@@ -467,33 +490,32 @@ def mean_std_every_n(rewards, n=4096):
     x = np.arange(len(mean)) * n
     return x, mean, std
 
+# Agent Reward Mean over time plot
 plt.figure(figsize=(12, 8))
 block = 4096
 
 for randomStartAgent in range(numRandomStartAgents):
     x, mean, _ = mean_std_every_n(randomStartAgents[randomStartAgent].allRewards, block)
     plt.plot(x, mean, label=f"Random Start Agent {randomStartAgent+1}")
-    
 for saaAgent in range(numSaaAgents):
     x, mean, _ = mean_std_every_n(saaAgents[saaAgent].allRewards, block)
     plt.plot(x, mean, label=f"SAA Agent {saaAgent+1}")
-
 for ppoAgent in range(numPpoAgents):
     x, mean, _ = mean_std_every_n(ppoAgents[ppoAgent].allRewards, block)
     plt.plot(x, mean, label=f"PPO Agent {ppoAgent+1}")
-
 for dqnAgent in range(numDqnAgents):
     x, mean, _ = mean_std_every_n(dqnAgents[dqnAgent].allRewards, block)
     plt.plot(x, mean, label=f"DQN Agent {dqnAgent+1}")
     
 plt.xlabel("Time Step")
-plt.ylabel("Mean Reward (per 4096 steps)")
+plt.ylabel("Mean Reward (per Duty Cycle [52,428.8 usec])")
 plt.title("Mean Reward Over Time (Per Agent)")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
 plt.show()
 
+# Agent Reward Standard Deviation over time plot
 plt.figure(figsize=(12, 8))
 block = 4096
 
@@ -514,8 +536,148 @@ for dqnAgent in range(numDqnAgents):
     plt.plot(x, std, label=f"DQN Agent {dqnAgent+1}")
     
 plt.xlabel("Time Step")
-plt.ylabel("Reward Std Dev (per 4096 steps)")
-plt.title("Reward Variability Over Time (Per Agent)")
+plt.ylabel("Reward Std Dev")
+plt.title("Reward Variability Over Time (1 = 52,428.8 usec)")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# Average BW usage per agent over time plot
+plt.figure(figsize=(12, 8))
+block = 256
+
+for saaAgent in range(numSaaAgents):
+    allActionsArr = np.array(saaAgents[saaAgent].allActions)
+    x, mean, _ = mean_std_every_n(allActionsArr[:, 1], block)
+    plt.plot(x, mean, label=f"SAA Agent {saaAgent+1}")
+for ppoAgent in range(numPpoAgents):
+    allActionsArr = np.array(ppoAgents[ppoAgent].allActions)
+    x, mean, _ = mean_std_every_n(allActionsArr[:, 1], block)
+    plt.plot(x, mean, label=f"PPO Agent {ppoAgent+1}")
+for dqnAgent in range(numDqnAgents):
+    allActionsArr = np.array(dqnAgents[dqnAgent].allActions)
+    x, mean, _ = mean_std_every_n(allActionsArr[:, 1], block)
+    plt.plot(x, mean, label=f"DQN Agent {dqnAgent+1}")
+    
+plt.xlabel("Time Step")
+plt.ylabel("Mean Bandwidth in MHz (per Duty Cycle [52,428.8 usec])")
+plt.title("Mean Bandwidth Over Time (Per Agent)")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+
+
+# Average Collisions per agent over time plot
+plt.figure(figsize=(12, 8))
+block = 4096
+
+for randomStartAgent in range(numRandomStartAgents):
+    x, mean, _ = mean_std_every_n(randomStartAgents[randomStartAgent].collisions, block)
+    plt.plot(x, mean, label=f"Random Start Agent {saaAgent+1}")
+for saaAgent in range(numSaaAgents):
+    x, mean, _ = mean_std_every_n(saaAgents[saaAgent].collisions, block)
+    plt.plot(x, mean, label=f"SAA Agent {saaAgent+1}")
+for ppoAgent in range(numPpoAgents):
+    x, mean, _ = mean_std_every_n(ppoAgents[ppoAgent].collisions, block)
+    plt.plot(x, mean, label=f"PPO Agent {ppoAgent+1}")
+for dqnAgent in range(numDqnAgents):
+    x, mean, _ = mean_std_every_n(dqnAgents[dqnAgent].collisions, block)
+    plt.plot(x, mean, label=f"DQN Agent {dqnAgent+1}")
+    
+plt.xlabel("Time Step")
+plt.ylabel("Mean Collision Bandwidth in MHz (per 4096 steps)")
+plt.title("Mean Collision Bandwidth Over Time (Per Agent)")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# Mean Missed Opportunity Bandwidth per Duty Cycle
+plt.figure(figsize=(12, 8))
+block = 4096
+
+for dqnAgent in range(numDqnAgents):
+    x, mean, _ = mean_std_every_n(deadspace, block)
+    plt.plot(x, mean, label=f"Mean Deadspace {dqnAgent+1}")
+    
+plt.xlabel("Time Step (1 = 52,428.8 usec)")
+plt.ylabel("Mean Unused Bandwidth (MHz)")
+plt.title("Mean Unused Bandwidth Over Time")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# Delta BW Per Agent Plot
+plt.figure(figsize=(12, 8))
+block = 256
+
+for saaAgent in range(numSaaAgents):
+    allActionsArr = np.array(saaAgents[saaAgent].allActions)
+    bandwidth = allActionsArr[:, 1]
+    diffs = np.abs(np.diff(bandwidth))
+
+    x, mean, _ = mean_std_every_n(diffs, block)
+    plt.plot(x, mean, label=f"SAA Agent {saaAgent+1}")
+
+for ppoAgent in range(numPpoAgents):
+    allActionsArr = np.array(ppoAgents[ppoAgent].allActions)
+    bandwidth = allActionsArr[:, 1]
+    diffs = np.abs(np.diff(bandwidth))
+
+    x, mean, _ = mean_std_every_n(diffs, block)
+    plt.plot(x, mean, label=f"PPO Agent {ppoAgent+1}")
+
+for dqnAgent in range(numDqnAgents):
+    allActionsArr = np.array(dqnAgents[dqnAgent].allActions)
+    bandwidth = allActionsArr[:, 1]
+    diffs = np.abs(np.diff(bandwidth))
+
+    x, mean, _ = mean_std_every_n(diffs, block)
+    plt.plot(x, mean, label=f"DQN Agent {dqnAgent+1}")
+
+plt.xlabel("Time Step (1 = 52,428.8 usec = 1 CPI)")
+plt.ylabel("Mean |Δ Bandwidth| (MHz) (per 256 pulses = 1 CPI)")
+plt.title("Average Bandwidth Change Over Time (Per Agent)")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# Delta Center Frequency Per Agent Plot
+plt.figure(figsize=(12, 8))
+block = 256
+
+for saaAgent in range(numSaaAgents):
+    allActionsArr = np.array(saaAgents[saaAgent].allActions)
+    centerFreq = allActionsArr[:, 0]
+    diffs = np.abs(np.diff(centerFreq))
+
+    x, mean, _ = mean_std_every_n(diffs, block)
+    plt.plot(x, mean, label=f"SAA Agent {saaAgent+1}")
+
+for ppoAgent in range(numPpoAgents):
+    allActionsArr = np.array(ppoAgents[ppoAgent].allActions)
+    centerFreq = allActionsArr[:, 0]
+    diffs = np.abs(np.diff(centerFreq))
+
+    x, mean, _ = mean_std_every_n(diffs, block)
+    plt.plot(x, mean, label=f"PPO Agent {ppoAgent+1}")
+
+for dqnAgent in range(numDqnAgents):
+    allActionsArr = np.array(dqnAgents[dqnAgent].allActions)
+    centerFreq = allActionsArr[:, 0]
+    diffs = np.abs(np.diff(centerFreq))
+
+    x, mean, _ = mean_std_every_n(diffs, block)
+    plt.plot(x, mean, label=f"DQN Agent {dqnAgent+1}")
+
+plt.xlabel("Time Step (1 = 52,428.8 usec = 1 CPI)")
+plt.ylabel("Mean |Δ Center Frequency| (MHz) (per 256 pulses = 1 CPI)")
+plt.title("Average Center Frequency Change Over Time (Per Agent)")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
