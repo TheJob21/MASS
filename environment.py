@@ -21,7 +21,7 @@ gaeParameter = 0.95 # lambda
 policyClipFraction = 0.2 # epsilon
 numGradientEpochs = 10
 learningRate = 0.00025
-collisionWeight = 15 # 0 - 30 alpha_c
+collisionWeight = 20 # 0 - 30 alpha_c
 bandwidthDistortionFactor = 0.2 # 0 - 1 Beta_bw
 centerDistortionFactor = 1 # 0 - 1 Beta_f_c
 
@@ -269,7 +269,7 @@ for ppoAgent in range(numPpoAgents):
 
 
 # main loop
-for i in range(350_000): # 1 = 12.8 microseconds
+for i in range(2_000_000): # 1 = 12.8 microseconds
     if i % 100_000 == 0:
         print(i, " iterations completed.")
     
@@ -407,7 +407,7 @@ for dqnAgent in range(numDqnAgents):
 stateMatrix = np.stack(allStates)
 
 colors = []
-colorCount = numStaticAgents + numRandomStartAgents + numSaaAgents + numPpoAgents + numDqnAgents + 2
+colorCount = numRandomStartAgents + numSaaAgents + numPpoAgents + numDqnAgents + 3
 
 cmap = build_agent_colormap(colorCount)
 bounds = []
@@ -433,8 +433,10 @@ plt.title("Spectrum Occupancy Over Time by Agent")
 cbar = plt.colorbar(ticks=ticks)
 tickLabels = []
 tickLabels.append("Free")
-for staticAgent in range(numStaticAgents):
-    tickLabels.append("Static " + str(staticAgent + 1))
+# One color for all static agents
+tickLabels.append("Static Agents")
+# for staticAgent in range(numStaticAgents):
+#     tickLabels.append("Static " + str(staticAgent + 1))
 for randomStartAgent in range(numRandomStartAgents):
     tickLabels.append("Random Start Agent " + str(randomStartAgent + 1))    
 for saaAgent in range(numSaaAgents):
