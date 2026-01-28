@@ -167,18 +167,23 @@ def sum_recent_rewards(rewardMap, end_t, window=256):
     )
 
 def build_labeled_state(
+    staticActionsLists,
     listOfActionsLists,
     fftSize=1024
 ):
     state = np.zeros(fftSize, dtype=np.int8)
     i = 1 # 0 represents empty
-    
+    for interval in staticActionsLists:
+        if interval is not None:
+                s, e = interval
+                state[s:e] = i
+    i += 1
     for actionsList in listOfActionsLists:
         for interval in actionsList:
             if interval is not None:
                 s, e = interval
                 state[s:e] = i
-            i = i+1
+            i += 1
 
     # Collision override
     occupied_counts = np.zeros(fftSize, dtype=int)
@@ -320,7 +325,8 @@ for i in range(2_000_000): # 1 = 12.8 microseconds
     for dqnAgent in dqnAgents:
         previousState = updateStateInterval(previousState, dqnAgent.currentAction)
     labeled_state = build_labeled_state(
-        listOfActionsLists=[[agent.currentAction for agent in staticAgents],
+        staticActionsLists=[agent.currentAction for agent in staticAgents],
+        listOfActionsLists=[
         [agent.currentAction for agent in randomStartAgents],
         [agent.currentAction for agent in saaAgents],
         [agent.currentAction for agent in ppoAgents],
