@@ -21,9 +21,9 @@ gaeParameter = 0.95 # lambda
 policyClipFraction = 0.2 # epsilon
 numGradientEpochs = 10
 learningRate = 0.00025
-collisionWeight = 25 # 0 - 30 alpha_c
-bandwidthDistortionFactor = 0.2 # 0 - 1 Beta_bw
-centerDistortionFactor = 0.7 # 0 - 1 Beta_f_c
+collisionWeight = 30 # 0 - 30 alpha_c
+bandwidthDistortionFactor = 1 # 0 - 1 Beta_bw
+centerDistortionFactor = 1 # 0 - 1 Beta_f_c
 
 # Radar system parameters
 startingFrequency = 2400 # MHz
@@ -116,10 +116,10 @@ def computeRewardsForAgents(
         if currAction is None:
             continue
 
-        countTx = currAction[1] - currAction[0]
+        amountTx = (currAction[1] - currAction[0]) * binSize # MHz
 
         reward = 0
-        if countTx > 0:
+        if amountTx > 0:
             state = initState(fftSize)
 
             # Other agents of same type
@@ -132,19 +132,19 @@ def computeRewardsForAgents(
                 for interval in actionMap:
                     state = updateStateInterval(state, interval)
 
-            collisionsCount = computeCollisions(
+            collisionAmount = computeCollisions(
                 state, currAction
-            )
+            ) * binSize # MHz
 
             # transmitted - widest open bandwidth - collisionCount*collisionWeight(0-1)
-            widestOpenBandwidth = 0
+            widestOpenBandwidth = 0 # MHz
             if B_widest != None:
-                widestOpenBandwidth = (B_widest[1] - B_widest[0])
+                widestOpenBandwidth = (B_widest[1] - B_widest[0]) * binSize
                 
-            rewardSpectrum = (countTx - widestOpenBandwidth) - (collisionWeight * collisionsCount)
+            rewardSpectrum = (amountTx - widestOpenBandwidth) - (collisionWeight * collisionAmount)
             
             # Store Collision amount
-            cogAgent.collisions.append(collisionsCount*binSize)
+            cogAgent.collisions.append(collisionAmount*binSize)
             
             rewardAdapt = 0
             prevAgentActionsArr = np.array(cogAgent.previousActions)
@@ -241,7 +241,8 @@ def intervalToCenterFreqBW(interval):
     return (centerFreq, intervalBW)
 
 previousState = initState(fftSize) # S
-allStates = deque(maxlen=10000)
+spectrumSampleSize=10000
+allStates = []
 last16States = deque(maxlen=16)
 deadspace = [] # MHz
 device = "cpu"
@@ -287,20 +288,28 @@ for ppoAgent in range(numPpoAgents):
 
 
 # main loop
-for i in range(2_000_000): # 1 = 12.8 microseconds
+spectrumSampleSize
+iterations = 750_000
+for i in range(iterations): # 1 = 12.8 microseconds
     if i % 100_000 == 0:
         print(i, " iterations completed.")
     
-    # Static Agent Actions. Toggle between stable action and random actions every 500 steps
+    # Static Agent Actions. Simulate frequency changes
     for staticAgent in staticAgents:
         staticAgent.wobbleCurrentAction()
-    if i % 1000 == 0:
-        for staticAgent in staticAgents:
-            staticAgent.toggleAction()
-    elif i % 1000 == 500:
-        for staticAgent in staticAgents:
-            staticAgent.takeRandomAction()
-    
+    for j in range(numStaticAgents):
+        # Every 100_000 iterations, change the actionToToggle
+        if (j + 1) * 100_000 == i:
+            staticAgents[j].takeRandomAction()
+            staticAgents[j].actionToToggle = staticAgents[j].currentAction
+        # For 800 iterations, use actionToToggle
+        if i % 1000 == (j * 100) % 1000:
+            for staticAgent in staticAgents:
+                staticAgent.toggleAction()
+        # For 200 iterations, use new random action               
+        elif i % 1000 == (800 + j * 100) % 1000:
+            for staticAgent in staticAgents:
+                staticAgent.takeRandomAction()
     
     # Generate actions for SAA agents
     if i % 16 == 8:
@@ -343,16 +352,17 @@ for i in range(2_000_000): # 1 = 12.8 microseconds
         previousState = updateStateInterval(previousState, ppoAgent.currentAction)
     for dqnAgent in dqnAgents:
         previousState = updateStateInterval(previousState, dqnAgent.currentAction)
-    labeled_state = build_labeled_state(
-        staticActionsLists=[agent.currentAction for agent in staticAgents],
-        listOfActionsLists=[
-        [agent.currentAction for agent in randomStartAgents],
-        [agent.currentAction for agent in saaAgents],
-        [agent.currentAction for agent in ppoAgents],
-        [agent.currentAction for agent in dqnAgents]],
-        fftSize=fftSize
-    )
-    allStates.append(labeled_state)
+    # Only build labeled state for final sample size
+    if i >= iterations-spectrumSampleSize: 
+        allStates.append(build_labeled_state(
+            staticActionsLists=[agent.currentAction for agent in staticAgents],
+            listOfActionsLists=[
+            [agent.currentAction for agent in randomStartAgents],
+            [agent.currentAction for agent in saaAgents],
+            [agent.currentAction for agent in ppoAgents],
+            [agent.currentAction for agent in dqnAgents]],
+            fftSize=fftSize
+        ))
     last16States.append(previousState.astype(float))
     deadSpaceInterval = getLargestDeadSpaceInterval(previousState)
     if deadSpaceInterval == None:
@@ -507,9 +517,9 @@ for dqnAgent in range(numDqnAgents):
     x, mean, _ = mean_std_every_n(dqnAgents[dqnAgent].allRewards, block)
     plt.plot(x, mean, label=f"DQN Agent {dqnAgent+1}")
     
-plt.xlabel("Time Step")
-plt.ylabel("Mean Reward (per Duty Cycle [52,428.8 usec])")
-plt.title("Mean Reward Over Time (Per Agent)")
+plt.xlabel("Time Step (1=52,428.8 usec = 1 CPI)")
+plt.ylabel("Mean Reward")
+plt.title("Mean Reward Over Time")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
