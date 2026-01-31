@@ -21,7 +21,7 @@ gaeParameter = 0.95 # lambda
 policyClipFraction = 0.2 # epsilon
 numGradientEpochs = 10
 learningRate = 0.00025
-collisionWeight = 30 # 0 - 30 alpha_c
+collisionWeight = 50 # 0 - 30 alpha_c
 bandwidthDistortionFactor = 1 # 0 - 1 Beta_bw
 centerDistortionFactor = 1 # 0 - 1 Beta_f_c
 
@@ -54,7 +54,7 @@ rewardParameters = (5,6) # (Beta_1, Beta_2)
 velocityStates = 10 # V
 pulseRepetitionInterval = 0.41 # ms (PRI)
 
-def initState(fftSize):
+def initState(fftSize=1024):
     return np.zeros(fftSize, dtype=bool)
 
 def updateStateInterval(previousState, interval):
@@ -89,8 +89,8 @@ def getLargestDeadSpaceInterval(prevState):
     return int(starts[idx]), int(ends[idx])
 
 def computeRewardsForAgents(
-    cognitiveAgents,
-    interferingActionMaps,
+    staticAgents,
+    cognitiveAgentLists,
     currentState
 ):
     """
@@ -110,58 +110,56 @@ def computeRewardsForAgents(
         Other agents' action maps that cause interference
     """
     B_widest = getLargestDeadSpaceInterval(currentState)
-    
-    for cogAgent in cognitiveAgents:
-        currAction = cogAgent.currentAction
-        if currAction is None:
-            continue
+    for cognitiveAgentList in cognitiveAgentLists:
+        for cogAgent in cognitiveAgentList:
+            currAction = cogAgent.currentAction
+            if currAction is None:
+                continue
 
-        amountTx = (currAction[1] - currAction[0]) * binSize # MHz
+            amountTx = (currAction[1] - currAction[0]) * binSize # MHz
 
-        reward = 0
-        if amountTx > 0:
-            state = initState(fftSize)
+            reward = 0
+            if amountTx > 0:
+                state = initState(fftSize)
 
-            # Other agents of same type
-            for cogAgent2 in cognitiveAgents:
-                if cogAgent2 != cogAgent:
-                    state = updateStateInterval(state, cogAgent2.currentAction)
+                # Interfering agents
+                for staticAgent in staticAgents:
+                    state = updateStateInterval(state, staticAgent.currentAction)
+                for cognitiveAgentList2 in cognitiveAgentLists:
+                    for cogAgent2 in cognitiveAgentList2:
+                        if cogAgent2 != cogAgent:
+                            state = updateStateInterval(state, cogAgent2.currentAction)
 
-            # Interfering agents
-            for actionMap in interferingActionMaps:
-                for interval in actionMap:
-                    state = updateStateInterval(state, interval)
+                collisionAmount = computeCollisions(
+                    state, currAction
+                ) * binSize # MHz
 
-            collisionAmount = computeCollisions(
-                state, currAction
-            ) * binSize # MHz
-
-            # transmitted - widest open bandwidth - collisionCount*collisionWeight(0-1)
-            widestOpenBandwidth = 0 # MHz
-            if B_widest != None:
-                widestOpenBandwidth = (B_widest[1] - B_widest[0]) * binSize
+                # transmitted - widest open bandwidth - collisionCount*collisionWeight(0-1)
+                widestOpenBandwidth = 0 # MHz
+                if B_widest != None:
+                    widestOpenBandwidth = (B_widest[1] - B_widest[0]) * binSize
+                    
+                rewardSpectrum = (amountTx - widestOpenBandwidth) - (collisionWeight * collisionAmount)
                 
-            rewardSpectrum = (amountTx - widestOpenBandwidth) - (collisionWeight * collisionAmount)
+                # Store Collision amount
+                cogAgent.collisions.append(collisionAmount)
+                
+                rewardAdapt = 0
+                prevAgentActionsArr = np.array(cogAgent.previousActions)
+                if len(prevAgentActionsArr) != 0:
+                    avgCenterFreq = prevAgentActionsArr[:, 0].mean()
+                    avgBW = prevAgentActionsArr[:, 1].mean()
+                    agentCenterFreq, agentBW = intervalToCenterFreqBW(currAction)
+                    deltaBW = abs(agentBW - avgBW)
+                    deltaCenterFreq = abs(agentCenterFreq - avgCenterFreq)
+                    rewardAdapt = (bandwidthDistortionFactor * deltaBW) + (centerDistortionFactor * deltaCenterFreq)
+                
+                reward = rewardSpectrum - rewardAdapt
+                
+            cogAgent.allRewards.append(reward)
             
-            # Store Collision amount
-            cogAgent.collisions.append(collisionAmount*binSize)
-            
-            rewardAdapt = 0
-            prevAgentActionsArr = np.array(cogAgent.previousActions)
-            if len(prevAgentActionsArr) != 0:
-                avgCenterFreq = prevAgentActionsArr[:, 0].mean()
-                avgBW = prevAgentActionsArr[:, 1].mean()
-                agentCenterFreq, agentBW = intervalToCenterFreqBW(currAction)
-                deltaBW = abs(agentBW - avgBW)
-                deltaCenterFreq = abs(agentCenterFreq - avgCenterFreq)
-                rewardAdapt = (bandwidthDistortionFactor * deltaBW) + (centerDistortionFactor * deltaCenterFreq)
-            
-            reward = rewardSpectrum - rewardAdapt
-            
-        cogAgent.allRewards.append(reward)
-        
-        if len(cogAgent.previousActions) == cogAgent.cpiLen:
-            cogAgent.previousActions.clear()
+            if len(cogAgent.previousActions) == cogAgent.cpiLen:
+                cogAgent.previousActions.clear()
 
 def sum_recent_rewards(rewardMap, end_t, window=256):
     """
@@ -240,7 +238,7 @@ def intervalToCenterFreqBW(interval):
     centerFreq = startingFrequency + ((binSize * interval[0]) + intervalBW) # MHz
     return (centerFreq, intervalBW)
 
-previousState = initState(fftSize) # S
+currentState = initState(fftSize) # S
 spectrumSampleSize=10000
 allStates = []
 last16States = deque(maxlen=16)
@@ -288,12 +286,30 @@ for ppoAgent in range(numPpoAgents):
 
 
 # main loop
-spectrumSampleSize
-iterations = 750_000
+iterations = 1_000_000
 for i in range(iterations): # 1 = 12.8 microseconds
     if i % 100_000 == 0:
         print(i, " iterations completed.")
     
+    
+    # Generate actions for SAA agents
+    if i % 16 == 8:
+        prevStateWithoutSaaAgents = initState(fftSize=fftSize)
+        for agents in [staticAgents, randomStartAgents, ppoAgents, dqnAgents]:
+            for agent in agents:
+                prevStateWithoutSaaAgents = updateStateInterval(prevStateWithoutSaaAgents, agent.currentAction)
+        for saaAgent in saaAgents:
+            prevStateWithoutSaaAgent = prevStateWithoutSaaAgents
+            for saaAgent2 in saaAgents:
+                if saaAgent != saaAgent2:
+                    prevStateWithoutSaaAgent = updateStateInterval(prevStateWithoutSaaAgent, saaAgent2.currentAction)
+            interval = getLargestDeadSpaceInterval(prevStateWithoutSaaAgent)
+            saaAgent.currentAction = interval
+            action = intervalToCenterFreqBW(interval)
+            saaAgent.previousActions.append(action)
+            saaAgent.allActions.append(action)
+            
+            
     # Static Agent Actions. Simulate frequency changes
     for staticAgent in staticAgents:
         staticAgent.wobbleCurrentAction()
@@ -304,21 +320,10 @@ for i in range(iterations): # 1 = 12.8 microseconds
             staticAgents[j].actionToToggle = staticAgents[j].currentAction
         # For 800 iterations, use actionToToggle
         if i % 1000 == (j * 100) % 1000:
-            for staticAgent in staticAgents:
-                staticAgent.toggleAction()
+            staticAgents[j].toggleAction()
         # For 200 iterations, use new random action               
         elif i % 1000 == (800 + j * 100) % 1000:
-            for staticAgent in staticAgents:
-                staticAgent.takeRandomAction()
-    
-    # Generate actions for SAA agents
-    if i % 16 == 8:
-        for saaAgent in saaAgents:
-            interval = getLargestDeadSpaceInterval(previousState)
-            saaAgent.currentAction = interval
-            action = intervalToCenterFreqBW(interval)
-            saaAgent.previousActions.append(action)
-            saaAgent.allActions.append(action)
+            staticAgents[j].takeRandomAction()
     
     # Generate actions for PPO agents
     if i % 16 == 0 and len(last16States) == 16: # every 204.8 usec
@@ -330,7 +335,7 @@ for i in range(iterations): # 1 = 12.8 microseconds
             ppoAgent.allActions.append(action)
     
     # Generate actions for DQN agents
-    state_t = previousState.astype(np.float32)
+    state_t = currentState.astype(np.float32)
     if i % 16 == 4:
         for dqnAgent in dqnAgents:
             action_idx = dqnAgent.select_action(state_t)
@@ -341,17 +346,11 @@ for i in range(iterations): # 1 = 12.8 microseconds
             dqnAgent.allActions.append(action)
 
     # Update state
-    previousState = initState(fftSize)
-    for staticAgent in staticAgents:
-        previousState = updateStateInterval(previousState, staticAgent.currentAction)
-    for randomStartAgent in randomStartAgents:
-        previousState = updateStateInterval(previousState, randomStartAgent.currentAction)
-    for saaAgent in saaAgents:
-        previousState = updateStateInterval(previousState, saaAgent.currentAction)
-    for ppoAgent in ppoAgents:
-        previousState = updateStateInterval(previousState, ppoAgent.currentAction)
-    for dqnAgent in dqnAgents:
-        previousState = updateStateInterval(previousState, dqnAgent.currentAction)
+    currentState = initState(fftSize)
+    for agents in [staticAgents, randomStartAgents, saaAgents, ppoAgents, dqnAgents]:
+        for agent in agents:
+            currentState = updateStateInterval(currentState, agent.currentAction)
+    
     # Only build labeled state for final sample size
     if i >= iterations-spectrumSampleSize: 
         allStates.append(build_labeled_state(
@@ -363,39 +362,18 @@ for i in range(iterations): # 1 = 12.8 microseconds
             [agent.currentAction for agent in dqnAgents]],
             fftSize=fftSize
         ))
-    last16States.append(previousState.astype(float))
-    deadSpaceInterval = getLargestDeadSpaceInterval(previousState)
+    last16States.append(currentState.astype(float))
+    deadSpaceInterval = getLargestDeadSpaceInterval(currentState)
     if deadSpaceInterval == None:
        deadspace.append(0)
     else: 
         deadspace.append((deadSpaceInterval[1] - deadSpaceInterval[0]) * binSize)
     
-    # Compute reward for Random Start agents
+    # Compute reward for cognitive agents
     computeRewardsForAgents(
-        cognitiveAgents=randomStartAgents,
-        interferingActionMaps=[[a.currentAction for a in staticAgents], [a.currentAction for a in saaAgents], [a.currentAction for a in ppoAgents], [a.currentAction for a in dqnAgents]],
-        currentState=previousState
-    )
-
-    # Compute reward for SAA agents
-    computeRewardsForAgents(
-        cognitiveAgents=saaAgents,
-        interferingActionMaps=[[a.currentAction for a in staticAgents], [a.currentAction for a in randomStartAgents], [a.currentAction for a in ppoAgents], [a.currentAction for a in dqnAgents]],
-        currentState=previousState
-    )
-    
-    # Compute reward for PPO agents
-    computeRewardsForAgents(
-        cognitiveAgents=ppoAgents,
-        interferingActionMaps=[[a.currentAction for a in staticAgents], [a.currentAction for a in randomStartAgents], [a.currentAction for a in saaAgents], [a.currentAction for a in dqnAgents]],
-        currentState=previousState
-    )
-        
-    # Compute reward for DQN agents
-    computeRewardsForAgents(
-        cognitiveAgents=dqnAgents,
-        interferingActionMaps=[[a.currentAction for a in staticAgents], [a.currentAction for a in randomStartAgents], [a.currentAction for a in saaAgents], [a.currentAction for a in ppoAgents]],
-        currentState=previousState
+        staticAgents=staticAgents,
+        cognitiveAgentLists=[randomStartAgents, saaAgents, ppoAgents, dqnAgents],
+        currentState=currentState
     )
     
     if i % 16 == 0 and len(last16States) == 16: # every 204.8 usec
@@ -424,7 +402,7 @@ for i in range(iterations): # 1 = 12.8 microseconds
                 state_t,
                 action_idx,
                 reward,
-                previousState.astype(np.float32),
+                currentState.astype(np.float32),
                 False
             )
             dqnAgent.train_step()
@@ -505,17 +483,21 @@ plt.figure(figsize=(12, 8))
 block = 4096
 
 for randomStartAgent in range(numRandomStartAgents):
-    x, mean, _ = mean_std_every_n(randomStartAgents[randomStartAgent].allRewards, block)
+    x, mean, std = mean_std_every_n(randomStartAgents[randomStartAgent].allRewards, block)
     plt.plot(x, mean, label=f"Random Start Agent {randomStartAgent+1}")
+    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
 for saaAgent in range(numSaaAgents):
-    x, mean, _ = mean_std_every_n(saaAgents[saaAgent].allRewards, block)
+    x, mean, std = mean_std_every_n(saaAgents[saaAgent].allRewards, block)
     plt.plot(x, mean, label=f"SAA Agent {saaAgent+1}")
+    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
 for ppoAgent in range(numPpoAgents):
-    x, mean, _ = mean_std_every_n(ppoAgents[ppoAgent].allRewards, block)
+    x, mean, std = mean_std_every_n(ppoAgents[ppoAgent].allRewards, block)
     plt.plot(x, mean, label=f"PPO Agent {ppoAgent+1}")
+    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
 for dqnAgent in range(numDqnAgents):
-    x, mean, _ = mean_std_every_n(dqnAgents[dqnAgent].allRewards, block)
+    x, mean, std = mean_std_every_n(dqnAgents[dqnAgent].allRewards, block)
     plt.plot(x, mean, label=f"DQN Agent {dqnAgent+1}")
+    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
     
 plt.xlabel("Time Step (1=52,428.8 usec = 1 CPI)")
 plt.ylabel("Mean Reward")
@@ -525,33 +507,6 @@ plt.grid(True)
 plt.tight_layout()
 plt.show()
 
-# Agent Reward Standard Deviation over time plot
-plt.figure(figsize=(12, 8))
-block = 4096
-
-for randomStartAgent in range(numRandomStartAgents):
-    x, _, std = mean_std_every_n(randomStartAgents[randomStartAgent].allRewards, block)
-    plt.plot(x, std, label=f"Random Start Agent {randomStartAgent+1}")
-
-for saaAgent in range(numSaaAgents):
-    x, _, std = mean_std_every_n(saaAgents[saaAgent].allRewards, block)
-    plt.plot(x, std, label=f"SAA Agent {saaAgent+1}")
-
-for ppoAgent in range(numPpoAgents):
-    x, _, std = mean_std_every_n(ppoAgents[ppoAgent].allRewards, block)
-    plt.plot(x, std, label=f"PPO Agent {ppoAgent+1}")
-
-for dqnAgent in range(numDqnAgents):
-    x, _, std = mean_std_every_n(dqnAgents[dqnAgent].allRewards, block)
-    plt.plot(x, std, label=f"DQN Agent {dqnAgent+1}")
-    
-plt.xlabel("Time Step")
-plt.ylabel("Reward Std Dev")
-plt.title("Reward Variability Over Time (1 = 52,428.8 usec)")
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
-plt.show()
 
 # Average BW usage per agent over time plot
 plt.figure(figsize=(12, 8))
