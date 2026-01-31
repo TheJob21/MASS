@@ -10,8 +10,13 @@ class ReplayBuffer:
     def push(self, s, a, r, s_next, done):
         self.buffer.append((s, a, r, s_next, done))
 
-    def sample(self, batch_size):
-        batch = random.sample(self.buffer, batch_size)
+    def sample(self, batch_size, rng=None):
+        
+        batch = None
+        if rng == None:
+            batch = random.sample(self.buffer, batch_size)
+        else:
+            batch = rng.choice(self.buffer, size=batch_size, replace=False)
         s, a, r, s2, d = zip(*batch)
 
         return (

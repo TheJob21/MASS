@@ -24,18 +24,22 @@ class DQNAgent(CognitiveAgent):
         self.epsilon_decay = 0.9995
         self.gamma = 0.9
 
-    def select_action(self, state):
-        if np.random.rand() < self.epsilon:
-            return np.random.randint(len(self.actions))
+    def select_action(self, state, rng=None):
+        if rng == None:
+            if np.random.rand() < self.epsilon:
+                return np.random.randint(len(self.actions))
+        elif rng.random() < self.epsilon:
+            return rng.integers(len(self.actions))
+
         with torch.no_grad():
             q = self.policy(torch.tensor(state).unsqueeze(0))
             return q.argmax().item()
 
-    def train_step(self, batch_size=32):
+    def train_step(self, batch_size=32, rng=None):
         if len(self.buffer) < batch_size:
             return
 
-        s, a, r, s2, d = self.buffer.sample(batch_size)
+        s, a, r, s2, d = self.buffer.sample(batch_size, rng=rng)
 
         q = self.policy(s).gather(1, a.unsqueeze(1)).squeeze()
         with torch.no_grad():

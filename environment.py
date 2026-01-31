@@ -244,6 +244,7 @@ allStates = []
 last16States = deque(maxlen=16)
 deadspace = [] # MHz
 device = "cpu"
+rng = np.random.default_rng(42)
 
 # DQN Agent Parameters
 BANDWIDTHS = [32, 64, 96]
@@ -255,7 +256,7 @@ for bw in BANDWIDTHS:
         stop  = min(fftSize, start + bw)
         if stop - start == bw:
             DQN_ACTIONS.append((start, stop))
-numDqnAgents = 1
+numDqnAgents = 0
 dqnAgents = []
 for dqnAgent in range(numDqnAgents):
     dqnAgents.append(DQNAgent(fftSize=fftSize, actionList=DQN_ACTIONS, cpiLen=cpiLen, device=device))
@@ -264,13 +265,13 @@ for dqnAgent in range(numDqnAgents):
 numStaticAgents = 10
 staticAgents = []
 for staticAgent in range(numStaticAgents):
-    staticAgents.append(StaticAgent())
+    staticAgents.append(StaticAgent(rng=rng))
 
 # Random Single Action Agent
-numRandomStartAgents = 1
+numRandomStartAgents = 0
 randomStartAgents = []
 for randAgent in range(numRandomStartAgents):
-    randomStartAgents.append(RandomStartAgent())
+    randomStartAgents.append(RandomStartAgent(rng=rng))
 
 # SAA Agent Parameters
 numSaaAgents = 1 # Sense-And-Avoid
@@ -279,13 +280,14 @@ for saaAgent in range(numSaaAgents):
     saaAgents.append(SAAAgent())
 
 # PPO Agent Parameters
-numPpoAgents = 1 # Proximal Policy Optimization
+numPpoAgents = 0 # Proximal Policy Optimization
 ppoAgents = []
 for ppoAgent in range(numPpoAgents):
     ppoAgents.append(PPOAgent(fftSize=fftSize, cpiLen=cpiLen, device=device))
 
 
 # main loop
+
 iterations = 1_000_000
 for i in range(iterations): # 1 = 12.8 microseconds
     if i % 100_000 == 0:
@@ -312,18 +314,18 @@ for i in range(iterations): # 1 = 12.8 microseconds
             
     # Static Agent Actions. Simulate frequency changes
     for staticAgent in staticAgents:
-        staticAgent.wobbleCurrentAction()
+        staticAgent.wobbleCurrentAction(rng=rng)
     for j in range(numStaticAgents):
         # Every 100_000 iterations, change the actionToToggle
         if (j + 1) * 100_000 == i:
-            staticAgents[j].takeRandomAction()
+            staticAgents[j].takeRandomAction(rng=rng)
             staticAgents[j].actionToToggle = staticAgents[j].currentAction
         # For 800 iterations, use actionToToggle
         if i % 1000 == (j * 100) % 1000:
             staticAgents[j].toggleAction()
         # For 200 iterations, use new random action               
         elif i % 1000 == (800 + j * 100) % 1000:
-            staticAgents[j].takeRandomAction()
+            staticAgents[j].takeRandomAction(rng=rng)
     
     # Generate actions for PPO agents
     if i % 16 == 0 and len(last16States) == 16: # every 204.8 usec
@@ -338,7 +340,7 @@ for i in range(iterations): # 1 = 12.8 microseconds
     state_t = currentState.astype(np.float32)
     if i % 16 == 4:
         for dqnAgent in dqnAgents:
-            action_idx = dqnAgent.select_action(state_t)
+            action_idx = dqnAgent.select_action(state_t, rng=rng)
             interval = DQN_ACTIONS[action_idx]
             dqnAgent.currentAction = interval
             action = intervalToCenterFreqBW(interval)
@@ -355,8 +357,7 @@ for i in range(iterations): # 1 = 12.8 microseconds
     if i >= iterations-spectrumSampleSize: 
         allStates.append(build_labeled_state(
             staticActionsLists=[agent.currentAction for agent in staticAgents],
-            listOfActionsLists=[
-            [agent.currentAction for agent in randomStartAgents],
+            listOfActionsLists=[[agent.currentAction for agent in randomStartAgents],
             [agent.currentAction for agent in saaAgents],
             [agent.currentAction for agent in ppoAgents],
             [agent.currentAction for agent in dqnAgents]],
@@ -405,7 +406,7 @@ for i in range(iterations): # 1 = 12.8 microseconds
                 currentState.astype(np.float32),
                 False
             )
-            dqnAgent.train_step()
+            dqnAgent.train_step(rng=rng)
             
     if i % (16 * 1000) == 0:
         for dqnAgent in dqnAgents:
@@ -541,7 +542,7 @@ block = 4096
 
 for randomStartAgent in range(numRandomStartAgents):
     x, mean, _ = mean_std_every_n(randomStartAgents[randomStartAgent].collisions, block)
-    plt.plot(x, mean, label=f"Random Start Agent {saaAgent+1}")
+    plt.plot(x, mean, label=f"Random Start Agent {randomStartAgent+1}")
 for saaAgent in range(numSaaAgents):
     x, mean, _ = mean_std_every_n(saaAgents[saaAgent].collisions, block)
     plt.plot(x, mean, label=f"SAA Agent {saaAgent+1}")
