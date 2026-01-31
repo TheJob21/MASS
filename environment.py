@@ -264,19 +264,19 @@ for dqnAgent in range(numDqnAgents):
     dqnAgents.append(DQNAgent(fftSize=fftSize, actionList=DQN_ACTIONS, cpiLen=cpiLen, device=device))
 
 # Static Agents For Simulating Environment
-numStaticAgents = 10
+numStaticAgents = 15
 staticAgents = []
 for staticAgent in range(numStaticAgents):
     staticAgents.append(StaticAgent(rng=staticAgentRNG))
 
 # Random Single Action Agent
-numRandomStartAgents = 1
+numRandomStartAgents = 0
 randomStartAgents = []
 for randAgent in range(numRandomStartAgents):
     randomStartAgents.append(RandomStartAgent(rng=randomStartAgentRNG))
 
 # SAA Agent Parameters
-numSaaAgents = 0 # Sense-And-Avoid
+numSaaAgents = 1 # Sense-And-Avoid
 saaAgents = []
 for saaAgent in range(numSaaAgents):
     saaAgents.append(SAAAgent())
@@ -289,7 +289,7 @@ for ppoAgent in range(numPpoAgents):
 
 
 # main loop
-iterations = 1_000_000
+iterations = 2_000_000
 for i in range(iterations): # 1 = 12.8 microseconds
     if i % 100_000 == 0:
         print(i, " iterations completed.")
@@ -450,7 +450,7 @@ im = plt.imshow(
 im.format_cursor_data = lambda _: ""
 plt.xlabel("Frequency Bin")
 plt.ylabel("Time Step (1 time step = 12.8 usec)")
-plt.title("Spectrum Occupancy Over Time by Agent")
+plt.title(f"Spectrum Occupancy Over Time (Last {spectrumSampleSize} time steps)")
 cbar = plt.colorbar(ticks=ticks)
 tickLabels = []
 tickLabels.append("Free")
@@ -554,9 +554,9 @@ for dqnAgent in range(numDqnAgents):
     x, mean, _ = mean_std_every_n(dqnAgents[dqnAgent].collisions, block)
     plt.plot(x, mean, label=f"DQN Agent {dqnAgent+1}")
     
-plt.xlabel("Time Step")
-plt.ylabel("Mean Collision Bandwidth in MHz (per 4096 steps)")
-plt.title("Mean Collision Bandwidth Over Time (Per Agent)")
+plt.xlabel("Time Step (1 = 52,428.8 usec = 1 CPI)")
+plt.ylabel("Mean Collision Bandwidth in MH")
+plt.title("Mean Collision Bandwidth Over Time")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()

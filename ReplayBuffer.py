@@ -16,7 +16,8 @@ class ReplayBuffer:
         if rng == None:
             batch = random.sample(self.buffer, batch_size)
         else:
-            batch = rng.choice(self.buffer, size=batch_size, replace=False)
+            indices = rng.choice(len(self.buffer), size=batch_size, replace=False)
+            batch = [self.buffer[i] for i in indices]
         s, a, r, s2, d = zip(*batch)
 
         return (
