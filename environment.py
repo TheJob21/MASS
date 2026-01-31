@@ -244,7 +244,9 @@ allStates = []
 last16States = deque(maxlen=16)
 deadspace = [] # MHz
 device = "cpu"
-rng = np.random.default_rng(42)
+staticAgentRNG = np.random.default_rng(42)
+randomStartAgentRNG = np.random.default_rng(43)
+dqnAgentRNG = np.random.default_rng(44)
 
 # DQN Agent Parameters
 BANDWIDTHS = [32, 64, 96]
@@ -265,16 +267,16 @@ for dqnAgent in range(numDqnAgents):
 numStaticAgents = 10
 staticAgents = []
 for staticAgent in range(numStaticAgents):
-    staticAgents.append(StaticAgent(rng=rng))
+    staticAgents.append(StaticAgent(rng=staticAgentRNG))
 
 # Random Single Action Agent
-numRandomStartAgents = 0
+numRandomStartAgents = 1
 randomStartAgents = []
 for randAgent in range(numRandomStartAgents):
-    randomStartAgents.append(RandomStartAgent(rng=rng))
+    randomStartAgents.append(RandomStartAgent(rng=randomStartAgentRNG))
 
 # SAA Agent Parameters
-numSaaAgents = 1 # Sense-And-Avoid
+numSaaAgents = 0 # Sense-And-Avoid
 saaAgents = []
 for saaAgent in range(numSaaAgents):
     saaAgents.append(SAAAgent())
@@ -287,7 +289,6 @@ for ppoAgent in range(numPpoAgents):
 
 
 # main loop
-
 iterations = 1_000_000
 for i in range(iterations): # 1 = 12.8 microseconds
     if i % 100_000 == 0:
@@ -314,18 +315,18 @@ for i in range(iterations): # 1 = 12.8 microseconds
             
     # Static Agent Actions. Simulate frequency changes
     for staticAgent in staticAgents:
-        staticAgent.wobbleCurrentAction(rng=rng)
+        staticAgent.wobbleCurrentAction(rng=staticAgentRNG)
     for j in range(numStaticAgents):
         # Every 100_000 iterations, change the actionToToggle
         if (j + 1) * 100_000 == i:
-            staticAgents[j].takeRandomAction(rng=rng)
+            staticAgents[j].takeRandomAction(rng=staticAgentRNG)
             staticAgents[j].actionToToggle = staticAgents[j].currentAction
         # For 800 iterations, use actionToToggle
         if i % 1000 == (j * 100) % 1000:
             staticAgents[j].toggleAction()
         # For 200 iterations, use new random action               
         elif i % 1000 == (800 + j * 100) % 1000:
-            staticAgents[j].takeRandomAction(rng=rng)
+            staticAgents[j].takeRandomAction(rng=staticAgentRNG)
     
     # Generate actions for PPO agents
     if i % 16 == 0 and len(last16States) == 16: # every 204.8 usec
@@ -340,7 +341,7 @@ for i in range(iterations): # 1 = 12.8 microseconds
     state_t = currentState.astype(np.float32)
     if i % 16 == 4:
         for dqnAgent in dqnAgents:
-            action_idx = dqnAgent.select_action(state_t, rng=rng)
+            action_idx = dqnAgent.select_action(state_t, rng=dqnAgentRNG)
             interval = DQN_ACTIONS[action_idx]
             dqnAgent.currentAction = interval
             action = intervalToCenterFreqBW(interval)
@@ -406,7 +407,7 @@ for i in range(iterations): # 1 = 12.8 microseconds
                 currentState.astype(np.float32),
                 False
             )
-            dqnAgent.train_step(rng=rng)
+            dqnAgent.train_step(rng=dqnAgentRNG)
             
     if i % (16 * 1000) == 0:
         for dqnAgent in dqnAgents:
@@ -565,9 +566,8 @@ plt.show()
 plt.figure(figsize=(12, 8))
 block = 4096
 
-for dqnAgent in range(numDqnAgents):
-    x, mean, _ = mean_std_every_n(deadspace, block)
-    plt.plot(x, mean, label=f"Mean Deadspace {dqnAgent+1}")
+x, mean, _ = mean_std_every_n(deadspace, block)
+plt.plot(x, mean, label=f"Mean Deadspace")
     
 plt.xlabel("Time Step (1 = 52,428.8 usec)")
 plt.ylabel("Mean Unused Bandwidth (MHz)")
