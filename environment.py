@@ -258,7 +258,7 @@ for bw in BANDWIDTHS:
         stop  = min(fftSize, start + bw)
         if stop - start == bw:
             DQN_ACTIONS.append((start, stop))
-numDqnAgents = 0
+numDqnAgents = 1
 dqnAgents = []
 for dqnAgent in range(numDqnAgents):
     dqnAgents.append(DQNAgent(fftSize=fftSize, actionList=DQN_ACTIONS, cpiLen=cpiLen, device=device))
@@ -276,7 +276,7 @@ for randAgent in range(numRandomStartAgents):
     randomStartAgents.append(RandomStartAgent(rng=randomStartAgentRNG))
 
 # SAA Agent Parameters
-numSaaAgents = 1 # Sense-And-Avoid
+numSaaAgents = 0 # Sense-And-Avoid
 saaAgents = []
 for saaAgent in range(numSaaAgents):
     saaAgents.append(SAAAgent())
@@ -292,7 +292,7 @@ for ppoAgent in range(numPpoAgents):
 iterations = 2_000_000
 for i in range(iterations): # 1 = 12.8 microseconds
     if i % 100_000 == 0:
-        print(i, " iterations completed.")
+        print(i/1000, "K iterations completed.")
     
     
     # Generate actions for SAA agents
@@ -448,7 +448,7 @@ im = plt.imshow(
     norm=norm
 )
 im.format_cursor_data = lambda _: ""
-plt.xlabel("Frequency Bin")
+plt.xlabel("Frequency Bin (2.4-2.5 GHz)")
 plt.ylabel("Time Step (1 time step = 12.8 usec)")
 plt.title(f"Spectrum Occupancy Over Time (Last {spectrumSampleSize} time steps)")
 cbar = plt.colorbar(ticks=ticks)
@@ -527,9 +527,9 @@ for dqnAgent in range(numDqnAgents):
     x, mean, _ = mean_std_every_n(allActionsArr[:, 1], block)
     plt.plot(x, mean, label=f"DQN Agent {dqnAgent+1}")
     
-plt.xlabel("Time Step")
-plt.ylabel("Mean Bandwidth in MHz (per Duty Cycle [52,428.8 usec])")
-plt.title("Mean Bandwidth Over Time (Per Agent)")
+plt.xlabel("Time Step (1 = 52,428.8 usec)")
+plt.ylabel("Mean Bandwidth (MHz)")
+plt.title("Mean Bandwidth Over Time")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
@@ -555,7 +555,7 @@ for dqnAgent in range(numDqnAgents):
     plt.plot(x, mean, label=f"DQN Agent {dqnAgent+1}")
     
 plt.xlabel("Time Step (1 = 52,428.8 usec = 1 CPI)")
-plt.ylabel("Mean Collision Bandwidth in MH")
+plt.ylabel("Mean Collision Bandwidth (MHz)")
 plt.title("Mean Collision Bandwidth Over Time")
 plt.legend()
 plt.grid(True)
@@ -567,7 +567,7 @@ plt.figure(figsize=(12, 8))
 block = 4096
 
 x, mean, _ = mean_std_every_n(deadspace, block)
-plt.plot(x, mean, label=f"Mean Deadspace")
+plt.plot(x, mean, label="Mean Deadspace")
     
 plt.xlabel("Time Step (1 = 52,428.8 usec)")
 plt.ylabel("Mean Unused Bandwidth (MHz)")
@@ -606,8 +606,8 @@ for dqnAgent in range(numDqnAgents):
     plt.plot(x, mean, label=f"DQN Agent {dqnAgent+1}")
 
 plt.xlabel("Time Step (1 = 52,428.8 usec = 1 CPI)")
-plt.ylabel("Mean |Δ Bandwidth| (MHz) (per 256 pulses = 1 CPI)")
-plt.title("Average Bandwidth Change Over Time (Per Agent)")
+plt.ylabel("Mean |Δ Bandwidth| (MHz)")
+plt.title("Average Bandwidth Change Over Time")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
@@ -642,8 +642,8 @@ for dqnAgent in range(numDqnAgents):
     plt.plot(x, mean, label=f"DQN Agent {dqnAgent+1}")
 
 plt.xlabel("Time Step (1 = 52,428.8 usec = 1 CPI)")
-plt.ylabel("Mean |Δ Center Frequency| (MHz) (per 256 pulses = 1 CPI)")
-plt.title("Average Center Frequency Change Over Time (Per Agent)")
+plt.ylabel("Mean |Δ Center Frequency| (MHz)")
+plt.title("Average Center Frequency Change Over Time")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
