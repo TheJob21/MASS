@@ -258,7 +258,7 @@ for bw in BANDWIDTHS:
         stop  = min(fftSize, start + bw)
         if stop - start == bw:
             DQN_ACTIONS.append((start, stop))
-numDqnAgents = 1
+numDqnAgents = 0
 dqnAgents = []
 for dqnAgent in range(numDqnAgents):
     dqnAgents.append(DQNAgent(fftSize=fftSize, actionList=DQN_ACTIONS, cpiLen=cpiLen, device=device))
