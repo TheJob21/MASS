@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
-from torch.distributions import Normal
+from NormalWithRNG import NormalWithRNG
 from PPOActorCritic import RecurrentAttentionPPO
 from CognitiveAgent import CognitiveAgent
 
@@ -28,11 +28,21 @@ class PPOAgent(CognitiveAgent):
         lr=2.5e-4,
         num_epochs=10,
         entropy_coef=0.01,
-        horizon=1024
+        horizon=1024,
+        seed=None
     ):
         super().__init__(currentAction, fftSize, cpiLen)
         if policy == None:
-            self.policy = RecurrentAttentionPPO(fftSize).to(device)
+            if seed == None:
+                self.policy = RecurrentAttentionPPO(fftSize).to(device)
+            else:
+                state = torch.random.get_rng_state()
+                torch.manual_seed(seed)
+                self.policy = RecurrentAttentionPPO(fftSize).to(device)
+                torch.random.set_rng_state(state)
+                
+                self.torchRng = torch.Generator(device=device)
+                self.torchRng.manual_seed(seed)                
         else:
             self.policy = policy.to(device)
         
@@ -45,7 +55,7 @@ class PPOAgent(CognitiveAgent):
         self.entropy_coef = entropy_coef
         self.horizon = horizon
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=lr)
-
+        
         # Rollout buffers
         self.states = []
         self.actions = []
@@ -69,11 +79,19 @@ class PPOAgent(CognitiveAgent):
             mu, log_std, value, _ = self.policy(state)
 
             log_std = torch.clamp(log_std, -5, 2)
-            dist = Normal(mu, log_std.exp())
-            raw_action = dist.sample()
+            std = log_std.exp()
+            
+            dist = NormalWithRNG(mu, std)
+            raw_action = dist.sample(rng=self.torchRng)
+            
+
+            # Gaussian log-prob
             log_prob = dist.log_prob(raw_action).sum(dim=-1)
 
-        action = torch.tanh(raw_action)[0]  # (2,)
+            # Tanh correction (Jacobian)
+            #log_prob -= torch.log(1 - action.pow(2) + 1e-6).sum(dim=-1)
+
+        action = torch.tanh(raw_action)[0]      # squashed action
 
         center = action[0].item()
         bandwidth = (action[1].item() + 1) / 2
@@ -135,8 +153,8 @@ class PPOAgent(CognitiveAgent):
             mu, log_std, value_preds, _ = self.policy(states)
 
             log_std = torch.clamp(log_std, -5, 2)
-            dist = Normal(mu, log_std.exp())
-
+            std = log_std.exp()
+            dist = NormalWithRNG(mu, std)
             new_log_probs = dist.log_prob(actions).sum(dim=-1)
             ratio = torch.exp(new_log_probs - old_log_probs)
 
@@ -152,10 +170,11 @@ class PPOAgent(CognitiveAgent):
                 value_preds.view(-1),
                 returns
             )
-            entropy = dist.entropy().sum(dim=-1).mean()
 
+            entropy = dist.entropy().sum(dim=-1).mean() # Remove for now
+            #entropy = 0
             loss = policy_loss + 0.5 * value_loss - self.entropy_coef * entropy
-
+            
             self.optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)

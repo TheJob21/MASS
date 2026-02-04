@@ -1,10 +1,11 @@
 from CognitiveAgent import CognitiveAgent
 import numpy as np
 
-class RandomStartAgent(CognitiveAgent):
+class FixedStartAgent(CognitiveAgent):
     def __init__(self, currentAction=None, fftSize=1024, cpiLen=256, rng=None):
         super().__init__(currentAction, fftSize, cpiLen)
-        self.takeRandomAction(rng=rng)
+        if currentAction==None:
+            self.takeRandomAction(rng=rng)
         self.previousActions.append(self.currentAction)
         self.allActions.append(self.currentAction)
         

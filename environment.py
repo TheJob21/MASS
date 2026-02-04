@@ -2,12 +2,13 @@ import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import colorsys
+import torch
 import numpy as np
 from StaticAgent import StaticAgent
 from SAAAgent import SAAAgent
 from PPOAgent import PPOAgent
 from DQNAgent import DQNAgent
-from RandomStartAgent import RandomStartAgent
+from RandomStartAgent import FixedStartAgent
 from collections import deque
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
@@ -247,6 +248,8 @@ device = "cpu"
 staticAgentRNG = np.random.default_rng(42)
 randomStartAgentRNG = np.random.default_rng(43)
 dqnAgentRNG = np.random.default_rng(44)
+ppoSeed=45
+torch.Generator(device=device).manual_seed(ppoSeed)
 
 # DQN Agent Parameters
 BANDWIDTHS = [32, 64, 96]
@@ -273,7 +276,7 @@ for staticAgent in range(numStaticAgents):
 numRandomStartAgents = 0
 randomStartAgents = []
 for randAgent in range(numRandomStartAgents):
-    randomStartAgents.append(RandomStartAgent(rng=randomStartAgentRNG))
+    randomStartAgents.append(FixedStartAgent(rng=randomStartAgentRNG))
 
 # SAA Agent Parameters
 numSaaAgents = 0 # Sense-And-Avoid
@@ -282,17 +285,17 @@ for saaAgent in range(numSaaAgents):
     saaAgents.append(SAAAgent())
 
 # PPO Agent Parameters
-numPpoAgents = 0 # Proximal Policy Optimization
+numPpoAgents = 2 # Proximal Policy Optimization
 ppoAgents = []
 for ppoAgent in range(numPpoAgents):
-    ppoAgents.append(PPOAgent(fftSize=fftSize, cpiLen=cpiLen, device=device))
+    ppoAgents.append(PPOAgent(fftSize=fftSize, cpiLen=cpiLen, device=device, seed=ppoSeed+ppoAgent))
 
 
 # main loop
 iterations = 2_000_000
 for i in range(iterations): # 1 = 12.8 microseconds
     if i % 100_000 == 0:
-        print(i/1000, "K iterations completed.")
+        print(int(i/1000), "K iterations completed.")
     
     
     # Generate actions for SAA agents
