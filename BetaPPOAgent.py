@@ -1,9 +1,11 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
-from NormalWithRNG import NormalWithRNG
+from torch.distributions import Beta
+
 from PPOActorCritic import RecurrentAttentionPPO
 from CognitiveAgent import CognitiveAgent
+
 
 def continuous_action_to_interval(center, bandwidth, fftSize=1024):
     bw_bins = int(bandwidth * fftSize)
@@ -21,11 +23,12 @@ def continuous_action_to_interval(center, bandwidth, fftSize=1024):
 
 
 class PPOAgent(CognitiveAgent):
-    def __init__(self, 
-        currentAction=None, 
-        fftSize=1024, 
+    def __init__(
+        self,
+        currentAction=None,
+        fftSize=1024,
         cpiLen=256,
-        policy: RecurrentAttentionPPO=None,
+        policy: RecurrentAttentionPPO = None,
         device="cpu",
         gamma=0.8,
         lam=0.95,
@@ -34,90 +37,82 @@ class PPOAgent(CognitiveAgent):
         num_epochs=10,
         entropy_coef=0.01,
         horizon=1024,
-        seed=None
+        seed=None,
     ):
         super().__init__(currentAction, fftSize, cpiLen)
-        # Initialize Weights of Critic
-        if policy == None:
-            if seed == None:
-                self.policy = RecurrentAttentionPPO(fftSize).to(device)
-            else:
+
+        if policy is None:
+            if seed is not None:
                 state = torch.random.get_rng_state()
                 torch.manual_seed(seed)
                 self.policy = RecurrentAttentionPPO(fftSize).to(device)
                 torch.random.set_rng_state(state)
-                
-                self.torchRng = torch.Generator(device=device)
-                self.torchRng.manual_seed(seed)                
+            else:
+                self.policy = RecurrentAttentionPPO(fftSize).to(device)
         else:
             self.policy = policy.to(device)
-        
-        self.device = device
 
+        self.device = device
         self.gamma = gamma
         self.lam = lam
         self.clip_eps = clip_eps
         self.num_epochs = num_epochs
         self.entropy_coef = entropy_coef
         self.horizon = horizon
+
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=lr)
-        
+
         # Rollout buffers
         self.states = []
-        self.actions = []
+        self.actions = []      # stored in [0,1]
         self.log_probs = []
         self.values = []
         self.rewards = []
         self.dones = []
 
+    # --------------------------------------------------
+    # Action selection (Beta)
+    # --------------------------------------------------
     def select_action(self, state_seq_np, eval_mode=False):
-        """
-        state_seq_np: (T=16, fftSize=1024)
-        """
-
-        # 16 timesteps of states
         state = torch.as_tensor(
             state_seq_np,
             dtype=torch.float32,
-            device=self.device
+            device=self.device,
         ).unsqueeze(0)  # (1, 16, 1024)
 
         with torch.no_grad():
-            mu, log_std, value, _ = self.policy(state)
+            alpha, beta, value, _ = self.policy(state)
 
-            log_std = torch.clamp(log_std, -5, 2)
-            std = log_std.exp()
-            
+            # Safety clamps
+            alpha = alpha.clamp(min=1e-4)
+            beta = beta.clamp(min=1e-4)
+
+            dist = Beta(alpha, beta)
+
             if eval_mode:
-                raw_action = mu
+                # Deterministic: use mean
+                action_01 = alpha / (alpha + beta)
             else:
-                dist = NormalWithRNG(mu, std)
-                raw_action = dist.sample(rng=self.torchRng)
-            
-            action = torch.tanh(raw_action)  # (1, 2)
+                # Stochastic sampling
+                action_01 = dist.sample()
+                log_prob = dist.log_prob(action_01).sum(dim=-1)
 
-            if not eval_mode:
-                # Gaussian log-prob
-                log_prob = dist.log_prob(raw_action).sum(dim=-1)
-                
-                # Tanh correction (Jacobian)
-                log_prob -= torch.log(1 - action.pow(2) + 1e-6).sum(dim=-1)
+        action_01 = action_01[0]  # (2,)
 
-            action = action[0]
-
-
-        center = action[0].item()
-        bandwidth = (action[1].item() + 1) / 2
+        # Map actions
+        center = 2.0 * action_01[0].item() - 1.0   # [0,1] → [-1,1]
+        bandwidth = action_01[1].item()            # already [0,1]
 
         start, stop = continuous_action_to_interval(
             center, bandwidth, self.fftSize
         )
 
+        # Only store rollout data during training
         if not eval_mode:
-            self.states.append(state.squeeze(0).detach())        # (16, 1024)
-            self.actions.append(action.detach())                 # (2,)
-            self.log_probs.append(log_prob.squeeze(0).detach())             # ()
-            self.values.append(value.squeeze(0).detach())       # ()
+            self.states.append(state.squeeze(0).detach())
+            self.actions.append(action_01.detach())
+            self.log_probs.append(log_prob.squeeze(0).detach())
+            self.values.append(value.squeeze(0).detach())
 
         self.currentAction = (start, stop)
 
@@ -125,15 +120,17 @@ class PPOAgent(CognitiveAgent):
         self.rewards.append(float(reward))
         self.dones.append(done)
 
+    # --------------------------------------------------
+    # PPO update (unchanged math, correct distribution)
+    # --------------------------------------------------
     def update(self):
         if len(self.rewards) < self.horizon:
             return
 
-        # ---------- Stack buffers ----------
         states = torch.stack(self.states)          # (H, 16, 1024)
-        actions = torch.stack(self.actions)        # (H, action_dim)
-        old_log_probs = torch.stack(self.log_probs)  # (H,)
-        values = torch.stack(self.values).view(-1).detach()  # (H,)
+        actions = torch.stack(self.actions)        # (H, 2) in [0,1]
+        old_log_probs = torch.stack(self.log_probs)
+        values = torch.stack(self.values).view(-1).detach()
 
         rewards = self.rewards
         dones = self.dones
@@ -144,57 +141,46 @@ class PPOAgent(CognitiveAgent):
         next_value = 0.0
 
         for t in reversed(range(len(rewards))):
-            delta = (
-                rewards[t]
-                + self.gamma * next_value * (1 - dones[t])
-                - values[t].item()
-            )
+            delta = rewards[t] + self.gamma * next_value * (1 - dones[t]) - values[t].item()
             gae = delta + self.gamma * self.lam * (1 - dones[t]) * gae
             advantages.insert(0, gae)
             next_value = values[t].item()
 
-        advantages = torch.tensor(
-            advantages, dtype=torch.float32, device=self.device
-        )
+        advantages = torch.tensor(advantages, device=self.device)
         returns = advantages + values
 
-        # Normalize advantages
-        if advantages.numel() > 1:
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        # ---------- PPO update ----------
+        # ---------- PPO ----------
         for _ in range(self.num_epochs):
-            mu, log_std, value_preds, _ = self.policy(states)
+            alpha, beta, value_preds, _ = self.policy(states)
 
-            log_std = torch.clamp(log_std, -5, 2)
-            std = log_std.exp()
-            dist = NormalWithRNG(mu, std)
+            alpha = alpha.clamp(min=1e-4)
+            beta = beta.clamp(min=1e-4)
+
+            dist = Beta(alpha, beta)
             new_log_probs = dist.log_prob(actions).sum(dim=-1)
+
             ratio = torch.exp(new_log_probs - old_log_probs)
 
             surr1 = ratio * advantages
             surr2 = torch.clamp(
-                ratio,
-                1.0 - self.clip_eps,
-                1.0 + self.clip_eps
+                ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps
             ) * advantages
 
             policy_loss = -torch.min(surr1, surr2).mean()
-            value_loss = F.mse_loss(
-                value_preds.view(-1),
-                returns
-            )
+            value_loss = F.mse_loss(value_preds.view(-1), returns)
 
-            entropy = dist.entropy().sum(dim=-1).mean() # Remove for now
-            #entropy = 0
+            entropy = dist.entropy().sum(dim=-1).mean()
+
             loss = policy_loss + 0.5 * value_loss - self.entropy_coef * entropy
-            
+
             self.optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
             self.optimizer.step()
 
-        # ---------- Clear buffers ----------
+        # Clear buffers
         self.states.clear()
         self.actions.clear()
         self.log_probs.clear()

@@ -24,7 +24,12 @@ class DQNAgent(CognitiveAgent):
         self.epsilon_decay = 0.9995
         self.gamma = 0.9
 
-    def select_action(self, state, rng=None):
+    def select_action(self, state, rng=None, eval_mode=False):
+        if eval_mode:
+            with torch.no_grad():
+                q = self.policy(torch.tensor(state, dtype=torch.float32).unsqueeze(0))
+                return q.argmax(dim=1).item()
+        
         if rng == None:
             if np.random.rand() < self.epsilon:
                 return np.random.randint(len(self.actions))
