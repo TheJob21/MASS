@@ -1,4 +1,3 @@
-import torch
 import torch.nn as nn
 
 class RecurrentAttentionPPO(nn.Module):
@@ -29,7 +28,7 @@ class RecurrentAttentionPPO(nn.Module):
         )
 
         self.mu = nn.Linear(lstm_hidden, action_dim)
-        self.log_std = nn.Parameter(torch.zeros(action_dim))
+        self.log_std = nn.Linear(lstm_hidden, action_dim)
         self.value = nn.Linear(lstm_hidden, 1)
 
     def forward(self, obs_seq, hidden_state=None):
@@ -43,4 +42,7 @@ class RecurrentAttentionPPO(nn.Module):
         x, hidden = self.lstm(x, hidden_state)
         x = x[:, -1]                       # last pulse summary
 
-        return self.mu(x), self.log_std, self.value(x), hidden
+        mu = self.mu(x)
+        log_std = self.log_std(x)
+    
+        return mu, log_std, self.value(x), hidden

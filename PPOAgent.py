@@ -8,7 +8,7 @@ from CognitiveAgent import CognitiveAgent
 def continuous_action_to_interval(center, bandwidth, fftSize=1024):
     bw_bins = int(bandwidth * fftSize)
     # Enforce minimum 10 MHz (102 bins)
-    bw_bins = max(bw_bins, 102)
+    bw_bins = max(bw_bins, 204)
 
     # Map center from [-1,1] → [0, fftSize)
     center_bin = int((center + 1) / 2 * (fftSize-1))
@@ -27,12 +27,12 @@ class PPOAgent(CognitiveAgent):
         cpiLen=256,
         policy: RecurrentAttentionPPO=None,
         device="cpu",
-        gamma=0.8,
+        gamma=0.99,
         lam=0.95,
         clip_eps=0.2,
         lr=2.5e-4,
         num_epochs=10,
-        entropy_coef=0.01,
+        entropy_coef=0.001,
         horizon=1024,
         seed=None
     ):
@@ -64,28 +64,36 @@ class PPOAgent(CognitiveAgent):
         
         # Rollout buffers
         self.states = []
-        self.actions = []
+        self.raw_actions = []
         self.log_probs = []
         self.values = []
         self.rewards = []
         self.dones = []
+        self.hidden = None       
+        
+
+    def resetHidden(self):
+        self.hidden = None
 
     def select_action(self, state_seq_np, eval_mode=False):
         """
-        state_seq_np: (T=16, fftSize=1024)
+        state_seq_np: (T=iterations_per_pulse, fftSize=1024)
         """
 
-        # 16 timesteps of states
+        # iterations_per_pulse timesteps of states
         state = torch.as_tensor(
             state_seq_np,
             dtype=torch.float32,
             device=self.device
-        ).unsqueeze(0)  # (1, 16, 1024)
+        ).unsqueeze(0)  # (1, iterations_per_pulse, fftSize)
 
         with torch.no_grad():
-            mu, log_std, value, _ = self.policy(state)
+            mu, log_std, value, new_hidden = self.policy(state, self.hidden)
 
-            log_std = torch.clamp(log_std, -5, 2)
+            if new_hidden is not None:
+                self.hidden = (new_hidden[0].detach(), new_hidden[1].detach())
+            
+            log_std = torch.clamp(log_std, -5, 1)
             std = log_std.exp()
             
             if eval_mode:
@@ -114,24 +122,26 @@ class PPOAgent(CognitiveAgent):
         )
 
         if not eval_mode:
-            self.states.append(state.squeeze(0).detach())        # (16, 1024)
-            self.actions.append(action.detach())                 # (2,)
-            self.log_probs.append(log_prob.squeeze(0).detach())             # ()
-            self.values.append(value.squeeze(0).detach())       # ()
+            self.states.append(state.squeeze(0).detach())
+            self.raw_actions.append(raw_action.squeeze(0).detach())
+            self.log_probs.append(log_prob.squeeze(0).detach())
+            self.values.append(value.squeeze(0).detach())
 
         self.currentAction = (start, stop)
 
     def store_reward(self, reward, done=False):
         self.rewards.append(float(reward))
         self.dones.append(done)
+        
+        if done:
+            self.resetHidden()
 
     def update(self):
         if len(self.rewards) < self.horizon:
             return
 
         # ---------- Stack buffers ----------
-        states = torch.stack(self.states)          # (H, 16, 1024)
-        actions = torch.stack(self.actions)        # (H, action_dim)
+        states = torch.stack(self.states)          # (H, iterations_per_pulse, fftSize)
         old_log_probs = torch.stack(self.log_probs)  # (H,)
         values = torch.stack(self.values).view(-1).detach()  # (H,)
 
@@ -141,7 +151,9 @@ class PPOAgent(CognitiveAgent):
         # ---------- GAE ----------
         advantages = []
         gae = 0.0
-        next_value = 0.0
+        with torch.no_grad():
+            _, _, next_value_tensor, _ = self.policy(states[-1].unsqueeze(0))
+            next_value = next_value_tensor.item()
 
         for t in reversed(range(len(rewards))):
             delta = (
@@ -161,15 +173,24 @@ class PPOAgent(CognitiveAgent):
         # Normalize advantages
         if advantages.numel() > 1:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
+        print("Advantages (mean, std)", advantages.mean(), advantages.std())
+        
         # ---------- PPO update ----------
         for _ in range(self.num_epochs):
-            mu, log_std, value_preds, _ = self.policy(states)
+            hidden = None
+            mu, log_std, value_preds, hidden = self.policy(states, hidden)
 
-            log_std = torch.clamp(log_std, -5, 2)
+            log_std = torch.clamp(log_std, -5, 1)
             std = log_std.exp()
             dist = NormalWithRNG(mu, std)
-            new_log_probs = dist.log_prob(actions).sum(dim=-1)
+            
+            raw_actions = torch.stack(self.raw_actions)
+
+            new_log_probs = dist.log_prob(raw_actions).sum(dim=-1)
+
+            tanh_actions = torch.tanh(raw_actions)
+            new_log_probs -= torch.log(1 - tanh_actions.pow(2) + 1e-6).sum(dim=-1)
+            
             ratio = torch.exp(new_log_probs - old_log_probs)
 
             surr1 = ratio * advantages
@@ -185,8 +206,7 @@ class PPOAgent(CognitiveAgent):
                 returns
             )
 
-            entropy = dist.entropy().sum(dim=-1).mean() # Remove for now
-            #entropy = 0
+            entropy = dist.entropy().sum(dim=-1).mean() 
             loss = policy_loss + 0.5 * value_loss - self.entropy_coef * entropy
             
             self.optimizer.zero_grad()
@@ -196,7 +216,7 @@ class PPOAgent(CognitiveAgent):
 
         # ---------- Clear buffers ----------
         self.states.clear()
-        self.actions.clear()
+        self.raw_actions.clear()
         self.log_probs.clear()
         self.values.clear()
         self.rewards.clear()

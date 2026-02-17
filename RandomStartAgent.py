@@ -6,8 +6,6 @@ class FixedStartAgent(CognitiveAgent):
         super().__init__(currentAction, fftSize, cpiLen)
         if currentAction==None:
             self.takeRandomAction(rng=rng)
-        self.previousActions.append(self.currentAction)
-        self.allActions.append(self.currentAction)
         
     def takeRandomAction(self, rng=None, min_true=30, max_true=102):
         if max_true > self.fftSize:

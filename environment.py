@@ -23,9 +23,9 @@ gaeParameter = 0.95 # lambda
 policyClipFraction = 0.2 # epsilon
 numGradientEpochs = 10
 learningRate = 0.00025
-collisionWeight = 30 # 0 - 50 alpha_c
-bandwidthDistortionFactor = .2 # 0 - 1 Beta_bw
-centerDistortionFactor = .9 # 0 - 1 Beta_f_c
+collisionWeight = 10 # 0 - 50 alpha_c
+bandwidthDistortionFactor = 0.1 # 0 - 1 Beta_bw
+centerDistortionFactor = 0.4 # 0 - 1 Beta_f_c
 
 # Radar system parameters
 startingFrequency = 2400 # MHz
@@ -112,6 +112,11 @@ def computeRewardsForAgents(
         Other agents' action maps that cause interference
     """
     B_widest = deadSpaceInterval
+    # transmitted - widest open bandwidth - collisionCount*collisionWeight(0-1)
+    widestOpenBandwidth = 0 # MHz
+    if B_widest != None:
+        widestOpenBandwidth = (B_widest[1] - B_widest[0]) * binSize
+             
     for cogAgent in cognitiveAgents:
         currAction = cogAgent.currentAction
         if currAction is None:
@@ -132,32 +137,24 @@ def computeRewardsForAgents(
                 state, currAction
             ) * binSize # MHz
 
-            # transmitted - widest open bandwidth - collisionCount*collisionWeight(0-1)
-            widestOpenBandwidth = 0 # MHz
-            if B_widest != None:
-                widestOpenBandwidth = (B_widest[1] - B_widest[0]) * binSize
-                
-            rewardSpectrum = (amountTx - widestOpenBandwidth) - (collisionWeight * collisionAmount)
+               
+            rewardSpectrum = (amountTx - widestOpenBandwidth*.3) - (collisionWeight * collisionAmount**2) 
             
             # Store Collision amount
             cogAgent.collisions.append(collisionAmount)
             
-            rewardAdapt = 0
-            prevAgentActionsArr = np.array(cogAgent.previousActions)
-            if len(prevAgentActionsArr) != 0:
-                avgCenterFreq = prevAgentActionsArr[:, 0].mean()
-                avgBW = prevAgentActionsArr[:, 1].mean()
-                agentCenterFreq, agentBW = intervalToCenterFreqBW(currAction)
-                deltaBW = abs(agentBW - avgBW)
-                deltaCenterFreq = abs(agentCenterFreq - avgCenterFreq)
-                rewardAdapt = (bandwidthDistortionFactor * deltaBW) + (centerDistortionFactor * deltaCenterFreq)
+            avgCenterFreq = cogAgent.getAveCenterFreqForPulse()
+            avgBW = cogAgent.getAveBwForPulse()
+            agentCenterFreq, agentBW = intervalToCenterFreqBW(currAction)
+            deltaBW = abs(agentBW - avgBW)
+            deltaCenterFreq = abs(agentCenterFreq - avgCenterFreq)
+            
+            rewardAdapt = (bandwidthDistortionFactor * deltaBW) + (centerDistortionFactor * deltaCenterFreq)
             
             reward = rewardSpectrum - rewardAdapt
-            
+
         cogAgent.allRewards.append(reward)
         
-        if len(cogAgent.previousActions) == cogAgent.cpiLen:
-            cogAgent.previousActions.clear()
 
 def sum_recent_rewards(rewardMap, end_t, window=256):
     """
@@ -225,7 +222,7 @@ def build_agent_colormap(n_colors):
 def intervalToCenterFreqBW(interval):
     if interval == None:
         return (0,0)
-    intervalBW = binSize * (interval[1] - interval[0]) / 2 # MHz
+    intervalBW = binSize * (interval[1] - interval[0]) # MHz
     centerFreq = startingFrequency + ((binSize * interval[0]) + intervalBW) # MHz
     return (centerFreq, intervalBW)
 
@@ -268,29 +265,30 @@ spectrumSampleSize=10000
 allStates = []
 deadspace = [] # MHz
 device = "cpu"
-staticAgentRNG = np.random.default_rng(44)
-randomStartAgentRNG = np.random.default_rng(45)
-dqnAgentRNG = np.random.default_rng(46)
-ppoSeed=47
+staticAgentRNG = np.random.default_rng(45)
+randomStartAgentRNG = np.random.default_rng(46)
+dqnAgentRNG = np.random.default_rng(47)
+ppoSeed=48
 torch.Generator(device=device).manual_seed(ppoSeed)
 
 allCogAgents = []
 
 # Static Agents For Simulating Environment
-numStaticAgents = 1
+numStaticAgents = 2
 staticAgents = []
 for staticAgent in range(numStaticAgents):
     staticAgents.append(StaticAgent(rng=staticAgentRNG))
 
 # Random Single Action Agent
-numRandomStartAgents = 1
+numRandomStartAgents = 0
 randomStartAgents = []
 for randAgent in range(numRandomStartAgents):
     randomStartAgents.append(FixedStartAgent(rng=randomStartAgentRNG))
+    randomStartAgents[randAgent].storeAction(intervalToCenterFreqBW(randomStartAgents[randAgent].currentAction))
     allCogAgents.append(randomStartAgents[randAgent])
     
 # SAA Agent Parameters
-numSaaAgents = 1 # Sense-And-Avoid
+numSaaAgents = 0 # Sense-And-Avoid
 saaAgents = []
 for saaAgent in range(numSaaAgents):
     saaAgents.append(SAAAgent())
@@ -313,7 +311,7 @@ for bw in BANDWIDTHS:
         stop  = min(fftSize, start + bw)
         if stop - start == bw:
             DQN_ACTIONS.append((start, stop))
-numDqnAgents = 1
+numDqnAgents = 0
 dqnAgents = []
 for dqnAgent in range(numDqnAgents):
     dqnAgents.append(DQNAgent(fftSize=fftSize, actionList=DQN_ACTIONS, cpiLen=cpiLen, device=device))
@@ -328,7 +326,7 @@ fileSize = os.path.getsize(liveDataFilename)
 numSnapshots = fileSize // snapshotBytes
 
 sim = False # Set False for live data
-iterations = 8_000 if sim else numSnapshots
+iterations = 2_000_000 if sim else numSnapshots
 eval = False
 timestep = pulseWidth = 12.8 if sim else 10.24
 iterationsInPulse = int(pri / timestep)
@@ -347,12 +345,12 @@ with open(liveDataFilename, "rb") as f:
             for dqnAgent in dqnAgents:
                 dqnAgent.policy.eval()
                 dqnAgent.epsilon = 0.0
-            for agent in allCogAgents:
-                agent.allRewards.clear()
-                agent.allActions.clear()
-                agent.collisions.clear()
-            allStates.clear()
-            deadspace.clear()
+            # for agent in allCogAgents:
+            #     agent.allRewards.clear()
+            #     agent.allActions.clear()
+            #     agent.collisions.clear()
+            # allStates.clear()
+            # deadspace.clear()
         if i % 100_000 == 0:
             print(int(i/1000), "K iterations completed.")
         
@@ -371,8 +369,7 @@ with open(liveDataFilename, "rb") as f:
                 interval = getLargestDeadSpaceInterval(lastPulseStates[saaAgentI+numRandomStartAgents][-1])
                 saaAgent.currentAction = interval
                 action = intervalToCenterFreqBW(interval)
-                saaAgent.previousActions.append(action)
-                saaAgent.allActions.append(action)
+                saaAgent.storeAction(action)
                 
         # Generate actions for PPO agents
         if i % iterationsInPulse == 0: # every 204.8 usec
@@ -382,8 +379,7 @@ with open(liveDataFilename, "rb") as f:
                     obs_seq = np.stack(lastPulseStates[ppoAgentI + numRandomStartAgents + numSaaAgents])
                     ppoAgent.select_action(obs_seq, eval_mode=eval)
                     action = intervalToCenterFreqBW(ppoAgent.currentAction)
-                    ppoAgent.previousActions.append(action)
-                    ppoAgent.allActions.append(action)
+                    ppoAgent.storeAction(action)
         
         # Generate actions for DQN agents
         if i % iterationsInPulse == 4:
@@ -394,8 +390,7 @@ with open(liveDataFilename, "rb") as f:
                 interval = DQN_ACTIONS[action_idx]
                 dqnAgent.currentAction = interval
                 action = intervalToCenterFreqBW(interval)
-                dqnAgent.previousActions.append(action)
-                dqnAgent.allActions.append(action)
+                dqnAgent.storeAction(action)
                 
         # Static Agent Actions. Simulate frequency changes
         currentState = initState(fftSize)
@@ -460,7 +455,7 @@ with open(liveDataFilename, "rb") as f:
             deadSpaceInterval=deadSpaceInterval
         )
         
-        if not eval and i  % iterationsInPulse == 0 and len(lastPulseStates) == iterationsInPulse: # every 204.8 usec
+        if not eval and i  % iterationsInPulse == 0 and len(lastPulseStates) > 0 and len(lastPulseStates[0]) == iterationsInPulse: # every 204.8 usec
             # Update PPO Agents
             for ppoAgent in ppoAgents:
                 reward = sum_recent_rewards(
@@ -496,15 +491,15 @@ with open(liveDataFilename, "rb") as f:
                 dqnAgent.target.load_state_dict(dqnAgent.policy.state_dict())
 
 # Print Cumulative Rewards
-cumulativeRewardString = "Cumulative Reward:"
+cumulativeRewardString = "Cumulative Evaluation Reward:"
 for randomStartAgent in range(numRandomStartAgents):
-    print("Random Start Agent", randomStartAgent+1 if randomStartAgent > 0 else "", cumulativeRewardString, sum(randomStartAgents[randomStartAgent].allRewards))
+    print("Random Start Agent", randomStartAgent+1 if randomStartAgent > 0 else "", cumulativeRewardString, sum(randomStartAgents[randomStartAgent].allRewards[int(len(randomStartAgents[randomStartAgent].allRewards)*.8):]))
 for saaAgent in range(numSaaAgents):
-    print("SAA Agent", saaAgent+1 if saaAgent > 0 else "", cumulativeRewardString, sum(saaAgents[saaAgent].allRewards))
+    print("SAA Agent", saaAgent+1 if saaAgent > 0 else "", cumulativeRewardString, sum(saaAgents[saaAgent].allRewards[int(len(saaAgents[saaAgent].allRewards)*.8):]))
 for ppoAgent in range(numPpoAgents):
-    print("PPO Agent", ppoAgent+1 if ppoAgent > 0 else "", cumulativeRewardString, sum(ppoAgents[ppoAgent].allRewards))
+    print("PPO Agent", ppoAgent+1 if ppoAgent > 0 else "", cumulativeRewardString, sum(ppoAgents[ppoAgent].allRewards[int(len(ppoAgents[ppoAgent].allRewards)*.8):]))
 for dqnAgent in range(numDqnAgents):
-    print("DQN Agent", dqnAgent+1 if dqnAgent > 0 else "", cumulativeRewardString, sum(dqnAgents[dqnAgent].allRewards))
+    print("DQN Agent", dqnAgent+1 if dqnAgent > 0 else "", cumulativeRewardString, sum(dqnAgents[dqnAgent].allRewards[int(len(dqnAgents[dqnAgent].allRewards)*.8):]))
        
 
 # Spectrum Usage and collisions per agent over time 
@@ -540,13 +535,13 @@ tickLabels.append("Free")
 # One color for all static agents
 tickLabels.append("Static Agents")
 for randomStartAgent in range(numRandomStartAgents):
-    tickLabels.append("Random Start Agent " + str(randomStartAgent + 1) if randomStartAgent == 0 else "")    
+    tickLabels.append("Random Start Agent " + (str(randomStartAgent + 1) if randomStartAgent == 0 else ""))  
 for saaAgent in range(numSaaAgents):
-    tickLabels.append("SAA " + str(saaAgent + 1) if saaAgent == 0 else "")
+    tickLabels.append("SAA " + (str(saaAgent + 1) if saaAgent == 0 else ""))
 for ppoAgent in range(numPpoAgents):
-    tickLabels.append("PPO " + str(ppoAgent + 1) if ppoAgent == 0 else "")
+    tickLabels.append("PPO " + (str(ppoAgent + 1) if ppoAgent == 0 else ""))
 for dqnAgent in range(numDqnAgents):
-    tickLabels.append("DQN " + str(dqnAgent + 1) if dqnAgent == 0 else "")
+    tickLabels.append("DQN " + (str(dqnAgent + 1) if dqnAgent == 0 else ""))
 tickLabels.append("Collision")
 
 cbar.ax.set_yticklabels(tickLabels)
