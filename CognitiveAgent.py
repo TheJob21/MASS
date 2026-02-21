@@ -1,18 +1,20 @@
 from Agent import Agent
-from collections import deque
 
 class CognitiveAgent(Agent):
     def __init__(self, currentAction=None, fftSize=1024, cpiLen=256):
-        super().__init__(currentAction, fftSize)
+        super().__init__(currentAction=currentAction, fftSize=fftSize)
         self.cpiLen = cpiLen
         self.allActions = [] # array of tuples (centerFreq (MHz), BW (MHz))
         self.collisions = [] # array of total frequency overlap in MHz
         self.allRewards = [] # array of reward per timestep
         self.sumCenterFreqForPulse = 0
         self.sumBwForPulse = 0
+        self.isTransmitting = False
     
     def storeAction(self, newAction):
         self.allActions.append(newAction)
+        self.isTransmitting = False if newAction == None else True
+        
         if len(self.allActions) % self.cpiLen == 0:
             self.sumCenterFreqForPulse = 0
             self.sumBwForPulse = 0
