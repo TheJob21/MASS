@@ -5,83 +5,62 @@ import numpy as np
 from NormalWithRNG import NormalWithRNG
 from CognitiveAgent import CognitiveAgent
 
-def continuous_action_to_interval(
-    center,
-    bandwidth,
-    fftSize=1024,
-    min_bw_bins=32
-):
-    """
-    center ∈ [-1, 1]
-    bandwidth ∈ [0, 1]
-    """
-
-    # --- Convert bandwidth to bins ---
-    bw_bins = int(round(bandwidth * fftSize))
-    bw_bins = np.clip(bw_bins, min_bw_bins, fftSize)
-
-    # --- Convert center to bin index ---
-    # Map [-1,1] → [0, fftSize-1]
-    center_bin = (center + 1.0) * 0.5 * (fftSize - 1)
-    center_bin = int(round(np.clip(center_bin, 0, fftSize - 1)))
-
-    # --- Compute half width ---
-    half_bw = bw_bins // 2
-
-    # --- Clip center so interval fits WITHOUT shifting afterward ---
-    min_center = half_bw
-    max_center = fftSize - half_bw - 1
-    center_bin = int(np.clip(center_bin, min_center, max_center))
-
-    # --- Final interval ---
-    start = center_bin - half_bw
-    stop = start + bw_bins
-
-    return start, stop
-
-class RecurrentAttentionPPO(nn.Module):
+class RecurrentSpectrumPPO(nn.Module):
     def __init__(
         self,
         fftSize=1024,
         d_model=128,
-        # num_heads=4,
-        lstm_hidden=84,
+        lstm_hidden=128,
         action_dim=2
     ):
         super().__init__()
 
-        # Embed full spectrum snapshot
+        # Intra-pulse encoder
         self.embedding = nn.Linear(fftSize, d_model)
 
-        # Temporal attention across pulses
-        # self.attention = nn.MultiheadAttention(
-        #     embed_dim=d_model,
-        #     num_heads=num_heads,
-        #     batch_first=True
-        # )
-
+        # Temporal memory across decisions
         self.lstm = nn.LSTM(
             input_size=d_model,
             hidden_size=lstm_hidden,
             batch_first=True
         )
 
+        # Actor head
         self.mu = nn.Linear(lstm_hidden, action_dim)
         self.log_std = nn.Linear(lstm_hidden, action_dim)
+
+        # Critic head
         self.value = nn.Linear(lstm_hidden, 1)
 
-    def forward(self, obs_seq, hidden_state=None):
+    def encode_pulse(self, pulse_seq):
         """
-        obs_seq: (B, samples-per-pulse, 1024)
+        pulse_seq: (B, samples_per_pulse, 1024)
+        Returns: (B, d_model)
         """
-        x = F.relu(self.embedding(obs_seq))
-        x, hidden = self.lstm(x, hidden_state)
-        x = x[:, -1]
 
-        mu = self.mu(x)
-        log_std = self.log_std(x)
-        value = self.value(x)
-    
+        x = F.relu(self.embedding(pulse_seq))   # (B, samples, d_model)
+        x = x.mean(dim=1)                       # Mean pool pulse dimension
+        return x
+
+    def forward(self, pulse_seq_batch, hidden=None):
+        """
+        pulse_seq_batch: (B, T, samples_per_pulse, 1024)
+        """
+
+        B, T, S, F = pulse_seq_batch.shape
+
+        # Flatten B*T to encode pulses
+        pulse_seq_batch = pulse_seq_batch.view(B * T, S, F)
+
+        encoded = self.encode_pulse(pulse_seq_batch)   # (B*T, d_model)
+        encoded = encoded.view(B, T, -1)               # (B, T, d_model)
+
+        lstm_out, hidden = self.lstm(encoded, hidden)
+
+        mu = self.mu(lstm_out)
+        log_std = self.log_std(lstm_out)
+        value = self.value(lstm_out)
+
         return mu, log_std, value, hidden
 
 class PPOAgent(CognitiveAgent):
@@ -89,14 +68,14 @@ class PPOAgent(CognitiveAgent):
         currentAction=None, 
         fftSize=1024, 
         cpiLen=256,
-        policy: RecurrentAttentionPPO=None,
+        policy: RecurrentSpectrumPPO=None,
         device="cpu",
-        gamma=0.99,
+        gamma=0.95,
         lam=0.95,
         clip_eps=0.2,
         lr=2.5e-4,
         num_epochs=10,
-        entropy_coef=0.001,
+        entropy_coef=0.01,
         horizon=1024,
         seed=None
     ):
@@ -104,11 +83,11 @@ class PPOAgent(CognitiveAgent):
         # Initialize Weights of Critic
         if policy == None:
             if seed == None:
-                self.policy = RecurrentAttentionPPO().to(device)
+                self.policy = RecurrentSpectrumPPO().to(device)
             else:
                 state = torch.random.get_rng_state()
                 torch.manual_seed(seed)
-                self.policy = RecurrentAttentionPPO().to(device)
+                self.policy = RecurrentSpectrumPPO().to(device)
                 torch.random.set_rng_state(state)
                 
                 self.torchRng = torch.Generator(device=device)
@@ -134,69 +113,67 @@ class PPOAgent(CognitiveAgent):
         self.rewards = []
         self.dones = []
         self.hidden = None       
-        
+        self.bptt_chunk = 64   # truncated BPTT length
 
     def resetHidden(self):
         self.hidden = None
 
-    def select_action(self, state_seq_np, eval_mode=False, batch_size = 4):
+    def select_action(self, state_seq_np, eval_mode=False):
         """
-        state_seq_np: (T=iterations_per_pulse, fftSize=1024)
+        state_seq_np: (samples_per_pulse, 1024)
         """
-        
-        iterations_per_pulse = state_seq_np.shape[0]
-        seq_per_batch = iterations_per_pulse // batch_size  # e.g., 20 / 4 = 5
-        if iterations_per_pulse % batch_size != 0:
-            raise ValueError("iterations_per_pulse must be divisible by batch_size")
-    
-        # iterations_per_pulse timesteps of states
-        batched_states = torch.stack([
-            torch.as_tensor(
-                state_seq_np[i*seq_per_batch : (i+1)*seq_per_batch],
-                dtype=torch.float32,
-                device=self.device
-            )
-            for i in range(batch_size)
-        ])  # shape: (4, 5, 1024)
+
+        state_tensor = torch.as_tensor(
+            state_seq_np,
+            dtype=torch.float32,
+            device=self.device
+        ).unsqueeze(0).unsqueeze(0)
+        # shape: (1, 1, samples_per_pulse, 1024)
 
         with torch.no_grad():
-            mu, log_std, values, new_hidden = self.policy(batched_states, self.hidden)
 
-            if new_hidden is not None:
-                self.hidden = (new_hidden[0].detach(), new_hidden[1].detach())
-            
-            log_std = torch.clamp(log_std, -5, 1)
+            mu, log_std, value, new_hidden = self.policy(
+                state_tensor,
+                self.hidden
+            )
+
+            self.hidden = (
+                new_hidden[0].detach(),
+                new_hidden[1].detach()
+            )
+
+            mu = mu[:, -1]
+            log_std = torch.clamp(log_std[:, -1], -5, 1)
+            value = value[:, -1]
+
             std = log_std.exp()
-            
+
             if eval_mode:
-                raw_actions = mu
+                raw_action = mu
             else:
                 dist = NormalWithRNG(mu, std)
-                raw_actions = dist.sample(rng=self.torchRng)
-            
-            actions = torch.tanh(raw_actions)  # (1, 2)
-            action = actions.mean(dim=0)
-            
-            if not eval_mode:
-                # Gaussian log-prob
-                log_probs = dist.log_prob(raw_actions).sum(dim=-1)
-                
-                # Tanh correction (Jacobian)
-                log_probs -= torch.log(1 - actions.pow(2) + 1e-6).sum(dim=-1)
+                raw_action = dist.sample(rng=self.torchRng)
+                log_prob = dist.log_prob(raw_action).sum(dim=-1)
 
+                action = torch.tanh(raw_action)
+                log_prob -= torch.log(
+                    1 - action.pow(2) + 1e-6
+                ).sum(dim=-1)
 
-        center = action[0].item()
-        bandwidth = (action[1].item() + 1) / 2
+        action = torch.tanh(raw_action)
 
-        start, stop = continuous_action_to_interval(
+        center = action[0, 0].item()
+        bandwidth = (action[0, 1].item() + 1) / 2
+
+        start, stop = CognitiveAgent.continuous_action_to_interval(
             center, bandwidth, self.fftSize
         )
 
         if not eval_mode:
-            self.states.append(batched_states.detach())
-            self.raw_actions.append(raw_actions.detach())
-            self.log_probs.append(log_probs.detach())
-            self.values.append(values.detach())
+            self.states.append(state_tensor.squeeze(0))  # (1, S, 1024)
+            self.raw_actions.append(raw_action.detach())
+            self.log_probs.append(log_prob.detach())
+            self.values.append(value.detach())
 
         self.currentAction = (start, stop)
 
@@ -208,92 +185,122 @@ class PPOAgent(CognitiveAgent):
             self.resetHidden()
 
     def update(self):
+
         if len(self.rewards) < self.horizon:
             return
 
-        # ---------- Stack buffers ----------
-        # states: (H, B, seq_per_batch, fftSize)
-        states = torch.stack(self.states)  
-        raw_actions = torch.stack(self.raw_actions)  # (H, B, 2)
-        old_log_probs = torch.stack(self.log_probs)  # (H, B)
-        values = torch.stack(self.values).squeeze(-1) # (H, B)
+        device = self.device
+        H = len(self.rewards)
 
-        H, B = values.shape
-        rewards = self.rewards
-        dones = self.dones
+        # ---------------------------------------------
+        # Stack rollout
+        # ---------------------------------------------
+        states = torch.cat(self.states, dim=0)        # (H, S, 1024)
+        actions = torch.cat(self.raw_actions, dim=0)  # (H, 2)
+        old_log_probs = torch.cat(self.log_probs, dim=0)
+        values = torch.cat(self.values, dim=0).squeeze(-1)
 
-        # ---------- Compute GAE ----------
-        advantages = []
-        gae = 0.0
+        rewards = torch.tensor(self.rewards, dtype=torch.float32, device=device)
+        dones = torch.tensor(self.dones, dtype=torch.float32, device=device)
+
+        # ---------------------------------------------
+        # Compute GAE
+        # ---------------------------------------------
         with torch.no_grad():
-            # Use last state to estimate next value
-            last_state = states[-1]  # (B, seq_per_batch, fftSize)
-            _, _, next_value_tensor, _ = self.policy(last_state)
-            next_value = next_value_tensor.mean().item()  # average across batch
+            last_state = states[-1:].unsqueeze(0)  # (1,1,S,1024)
+            _, _, next_value, _ = self.policy(last_state, None)
+            next_value = next_value[:, -1].squeeze(-1)
 
-        for t in reversed(range(len(rewards))):
-            delta = (
-                rewards[t]
-                + self.gamma * next_value * (1 - dones[t])
-                - values[t].mean().item()
-            )
+        advantages = torch.zeros_like(values)
+        gae = 0
+
+        for t in reversed(range(H)):
+            delta = rewards[t] + self.gamma * next_value * (1 - dones[t]) - values[t]
             gae = delta + self.gamma * self.lam * (1 - dones[t]) * gae
-            advantages.insert(0, gae)
-            next_value = values[t].mean().item()
+            advantages[t] = gae
+            next_value = values[t]
 
-        advantages = torch.tensor(
-            advantages, dtype=torch.float32, device=self.device
-        )  # (H,)
-        # repeat advantages for batch dimension
-        advantages = advantages.repeat_interleave(B)  # (H*B,)
-        # ---------- Compute returns ----------
-        # Flatten values to match flattened advantages
-        flat_values = values.view(-1)  # (H*B,)
-        returns = advantages + flat_values
+        returns = advantages + values
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        # ---------- Flatten buffers ----------
-        flat_states = states.view(H*B, states.size(2), states.size(3))  # (H*B, seq_per_batch, fftSize)
-        flat_actions = raw_actions.view(H*B, 2)
-        flat_old_log_probs = old_log_probs.view(-1)
-
-        # Normalize advantages
-        if advantages.numel() > 1:
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
-        # ---------- PPO update ----------
+        # ---------------------------------------------
+        # Recurrent PPO with truncated BPTT
+        # ---------------------------------------------
         for _ in range(self.num_epochs):
+
+            start = 0
             hidden = None
-            mu, log_std, value_preds, hidden = self.policy(flat_states, hidden)
 
-            log_std = torch.clamp(log_std, -5, 1)
-            std = log_std.exp()
-            dist = NormalWithRNG(mu, std)
+            while start < H:
 
-            new_log_probs = dist.log_prob(flat_actions).sum(dim=-1)
-            tanh_actions = torch.tanh(flat_actions)
-            new_log_probs -= torch.log(1 - tanh_actions.pow(2) + 1e-6).sum(dim=-1)
+                end = min(start + self.bptt_chunk, H)
 
-            ratio = torch.exp(new_log_probs - flat_old_log_probs)
+                state_chunk = states[start:end]     # (K, S, 1024)
+                action_chunk = actions[start:end]
+                old_log_chunk = old_log_probs[start:end]
+                adv_chunk = advantages[start:end]
+                return_chunk = returns[start:end]
+                done_chunk = dones[start:end]
 
-            surr1 = ratio * advantages
-            surr2 = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps) * advantages
+                # add batch dimension
+                state_chunk = state_chunk.unsqueeze(0)  # (1,K,S,1024)
 
-            policy_loss = -torch.min(surr1, surr2).mean()
-            value_loss = F.mse_loss(value_preds.view(-1), returns)
+                mu, log_std, value_pred, hidden = self.policy(
+                    state_chunk,
+                    hidden
+                )
 
-            entropy = dist.entropy().sum(dim=-1).mean()
-            loss = policy_loss + 0.5 * value_loss - self.entropy_coef * entropy
+                # detach hidden for truncated BPTT
+                hidden = (
+                    hidden[0].detach(),
+                    hidden[1].detach()
+                )
 
-            self.optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
-            self.optimizer.step()
+                mu = mu.squeeze(0)
+                log_std = torch.clamp(log_std.squeeze(0), -5, 1)
+                value_pred = value_pred.squeeze(0).squeeze(-1)
 
-        print("Entropy:", dist.entropy().mean())
-        print("Value loss:", value_loss)
-        print("Policy loss:", policy_loss)
+                std = log_std.exp()
+                dist = NormalWithRNG(mu, std)
 
-        # ---------- Clear buffers ----------
+                new_log_prob = dist.log_prob(action_chunk).sum(dim=-1)
+
+                tanh_action = torch.tanh(action_chunk)
+                new_log_prob -= torch.log(
+                    1 - tanh_action.pow(2) + 1e-6
+                ).sum(dim=-1)
+
+                ratio = torch.exp(new_log_prob - old_log_chunk)
+
+                surr1 = ratio * adv_chunk
+                surr2 = torch.clamp(
+                    ratio,
+                    1 - self.clip_eps,
+                    1 + self.clip_eps
+                ) * adv_chunk
+
+                policy_loss = -torch.min(surr1, surr2).mean()
+                value_loss = F.mse_loss(value_pred, return_chunk)
+                entropy = dist.entropy().sum(dim=-1).mean()
+
+                loss = policy_loss + value_loss - self.entropy_coef * entropy
+
+                self.optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    self.policy.parameters(), 0.5
+                )
+                self.optimizer.step()
+
+                start = end
+
+        print("Entropy:", entropy.item())
+        print("Value loss:", value_loss.item())
+        print("Policy loss:", policy_loss.item())
+
+        # ---------------------------------------------
+        # Clear buffers
+        # ---------------------------------------------
         self.states.clear()
         self.raw_actions.clear()
         self.log_probs.clear()

@@ -1,42 +1,15 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
+import copy
 from CognitiveAgent import CognitiveAgent
 
 
 # ============================================================
-# Utility: Continuous → Interval
+# MFOS AGENT (Inner Meta-Learner)
 # ============================================================
 
-def continuous_action_to_interval(center, bandwidth, fftSize=1024, min_bw_bins=32):
-
-    bw_bins = int(round(bandwidth * fftSize))
-    bw_bins = np.clip(bw_bins, min_bw_bins, fftSize)
-
-    center_bin = int(round((center + 1) * 0.5 * (fftSize - 1)))
-    center_bin = np.clip(center_bin, 0, fftSize - 1)
-
-    half = bw_bins // 2
-    start = center_bin - half
-    stop = start + bw_bins
-
-    if start < 0:
-        stop -= start
-        start = 0
-
-    if stop > fftSize:
-        start -= (stop - fftSize)
-        stop = fftSize
-
-    return int(start), int(stop)
-
-
-# ============================================================
-# MFOS Agent (Inner Gradient Learning + Outer Genome)
-# ============================================================
-
-class MFOSAgent(CognitiveAgent):
+class MFOSAgent(CognitiveAgent, nn.Module):
 
     def __init__(
         self,
@@ -47,25 +20,29 @@ class MFOSAgent(CognitiveAgent):
         currentAction=None,
         cpiLen=256
     ):
-        super().__init__(currentAction=currentAction,
-                         fftSize=fftSize,
-                         cpiLen=cpiLen)
+        nn.Module.__init__(self)
+        CognitiveAgent.__init__(
+            self,
+            currentAction=currentAction,
+            fftSize=fftSize,
+            cpiLen=cpiLen
+        )
 
         self.device = device
         self.fftSize = fftSize
         self.hidden_dim = hidden_dim
-
-        self.genome = genome  # evolved by GA
+        self.genome = genome
 
         self._build_inner_policy()
 
         self.hidden = None
         self.log_probs = []
         self.rewards = []
+        self.fitness = 0.0
 
-    # ============================================================
-    # Build Inner Recurrent Policy
-    # ============================================================
+    # --------------------------------------------------------
+    # Build RNN policy from genome
+    # --------------------------------------------------------
 
     def _build_inner_policy(self):
 
@@ -89,9 +66,9 @@ class MFOSAgent(CognitiveAgent):
             lr=self.genome["lr"]
         )
 
-    # ============================================================
-    # Forward
-    # ============================================================
+    # --------------------------------------------------------
+    # Forward pass
+    # --------------------------------------------------------
 
     def forward(self, x, hidden=None):
         out, hidden = self.gru(x, hidden)
@@ -103,30 +80,43 @@ class MFOSAgent(CognitiveAgent):
 
         return torch.stack([center, bandwidth], dim=-1), hidden
 
-    # ============================================================
-    # Select Action (called by MASS environment)
-    # ============================================================
+    # --------------------------------------------------------
+    # Select action
+    # --------------------------------------------------------
 
     def select_action(self, state_seq_np):
 
-        # state_seq_np: (T, fftSize)
         state = torch.tensor(
             state_seq_np,
             dtype=torch.float32,
             device=self.device
-        ).unsqueeze(0)  # (1, T, fftSize)
+        ).unsqueeze(0)
 
-        action, self.hidden = self.forward(state, self.hidden)
+        action, new_hidden = self.forward(state, self.hidden)
 
+        if new_hidden is not None:
+            self.hidden = new_hidden.detach()
+        else:
+            self.hidden = None
+            
         center = action[0, 0]
         bandwidth = action[0, 1]
 
-        # Create stochastic policy (REINFORCE)
         dist = torch.distributions.Normal(
             torch.stack([center, bandwidth]),
-            torch.tensor([0.1, 0.05], device=self.device)
+            torch.tensor(
+                [
+                    self.genome["exploration_center"],
+                    self.genome["exploration_bw"]
+                ],
+                device=self.device
+            )
         )
+        entropy = dist.entropy().sum().item()
+        if not hasattr(self, "entropy_history"):
+            self.entropy_history = []
 
+        self.entropy_history.append(entropy)
         sampled_action = dist.sample()
         log_prob = dist.log_prob(sampled_action).sum()
 
@@ -135,7 +125,7 @@ class MFOSAgent(CognitiveAgent):
         center_val = sampled_action[0].item()
         bandwidth_val = sampled_action[1].item()
 
-        start, stop = continuous_action_to_interval(
+        start, stop = CognitiveAgent.continuous_action_to_interval(
             center_val,
             bandwidth_val,
             self.fftSize
@@ -145,19 +135,21 @@ class MFOSAgent(CognitiveAgent):
 
         return self.currentAction
 
-    # ============================================================
-    # Record Reward (called after env step)
-    # ============================================================
+    # --------------------------------------------------------
+    # Reward tracking
+    # --------------------------------------------------------
 
     def record_reward(self, reward):
         self.rewards.append(reward)
+        self.fitness += reward
 
-    # ============================================================
-    # Inner Lifetime Update
-    # ============================================================
+    # --------------------------------------------------------
+    # Inner lifetime update (REINFORCE)
+    # --------------------------------------------------------
 
     def update(self):
-
+        self.last_update_stats = {}
+        
         gamma = self.genome["gamma"]
 
         returns = []
@@ -181,23 +173,198 @@ class MFOSAgent(CognitiveAgent):
 
         self.optimizer.zero_grad()
         loss.backward()
+        
+        total_norm = 0
+        for p in self.parameters():
+            if p.grad is not None:
+                total_norm += p.grad.data.norm(2).item() ** 2
+        total_norm = total_norm ** 0.5
+        self.last_update_stats["grad_norm"] = total_norm
+        self.last_update_stats["loss"] = loss.item()
+        old_params = torch.cat([p.data.flatten() for p in self.parameters()])
+        
         self.optimizer.step()
-
+        
+        new_params = torch.cat([p.data.flatten() for p in self.parameters()])
+        param_drift = torch.norm(new_params - old_params).item()
+        self.last_update_stats["param_drift"] = param_drift
+        
         self.log_probs = []
         self.rewards = []
-
-    # ============================================================
-    # Reset Between Episodes
-    # ============================================================
+        self.last_update_stats = {
+            "episode_return_mean": returns.mean().item(),
+            "episode_return_std": returns.std().item(),
+            "raw_fitness": self.fitness,
+        }
+        if returns.std().item() < 1e-6:
+            print("WARNING: Near-zero return variance")
+        if total_norm > 100:
+            print("WARNING: Exploding gradients")
+        if torch.isnan(loss):
+            print("WARNING: NaN loss detected")
+    # --------------------------------------------------------
+    # Reset between lifetimes
+    # --------------------------------------------------------
 
     def reset(self):
         self.hidden = None
         self.log_probs = []
         self.rewards = []
-
-    # ============================================================
-    # Reset Before New GA Generation
-    # ============================================================
+        self.entropy_history = []
 
     def reset_weights(self):
+        # Break graph references
+        self.hidden = None
+        self.log_probs = []
+        self.rewards = []
+
+        # Delete old modules if they exist
+        if hasattr(self, "gru"):
+            del self.gru
+        if hasattr(self, "actor"):
+            del self.actor
+        if hasattr(self, "optimizer"):
+            del self.optimizer
+
+        torch.cuda.empty_cache()  # safe on CPU
+
         self._build_inner_policy()
+
+    def set_genome(self, new_genome):
+        """
+        Assign a new genome from GA and rebuild inner policy.
+        """
+        self.genome = new_genome
+        self.reset_weights()  # rebuild GRU and optimizer using the new genome
+        self.fitness = 0.0    # reset fitness for next evaluation
+# ============================================================
+# GENETIC ALGORITHM OUTER LOOP (Meta-Learning)
+# ============================================================
+
+class GeneticAlgorithmOuterLoop:
+
+    def __init__(
+        self,
+        population_size,
+        base_genome,
+        mutation_scale=0.1,
+        elite_fraction=0.5
+    ):
+
+        self.population_size = population_size
+        self.mutation_scale = mutation_scale
+        self.elite_fraction = elite_fraction
+
+        self.population = [
+            self._mutate(copy.deepcopy(base_genome))
+            for _ in range(population_size)
+        ]
+
+        self.fitness = np.zeros(population_size)
+        self.current_index = 0
+
+    # --------------------------------------------------------
+    # Get current genome
+    # --------------------------------------------------------
+
+    def get_current_genome(self):
+        return self.population[self.current_index]
+
+    # --------------------------------------------------------
+    # Record fitness after lifetime
+    # --------------------------------------------------------
+
+    def record_fitness(self, fitness_value):
+        self.fitness[self.current_index] = fitness_value
+        self.current_index += 1
+        if not hasattr(self, "generation_stats"):
+            self.generation_stats = []
+
+    def is_generation_complete(self):
+        return self.current_index >= self.population_size
+
+    # --------------------------------------------------------
+    # Move to next genome
+    # --------------------------------------------------------
+
+    def next_individual(self):
+        self.current_index += 1
+
+    # --------------------------------------------------------
+    # Check if generation finished
+    # --------------------------------------------------------
+
+    def generation_complete(self):
+        return self.current_index >= self.population_size
+
+    # --------------------------------------------------------
+    # Evolve population
+    # --------------------------------------------------------
+
+    def evolve(self):
+        gen_stats = {
+            "fitness_mean": np.mean(self.fitness),
+            "fitness_std": np.std(self.fitness),
+            "fitness_max": np.max(self.fitness),
+            "fitness_min": np.min(self.fitness),
+        }
+        self.generation_stats.append(gen_stats)
+        lrs = [g["lr"] for g in self.population]
+        gammas = [g["gamma"] for g in self.population]
+        exploration_centers = [g["exploration_center"] for g in self.population]
+        gen_stats.update({
+            "lr_std": np.std(lrs),
+            "gamma_std": np.std(gammas),
+            "exploration_center_std": np.std(exploration_centers),
+        })
+        
+        elite_count = int(self.population_size * self.elite_fraction)
+        elite_indices = np.argsort(self.fitness)[-elite_count:]
+
+        elites = [self.population[i] for i in elite_indices]
+
+        new_population = elites.copy()
+
+        while len(new_population) < self.population_size:
+            parent = copy.deepcopy(np.random.choice(elites))
+            child = self._mutate(parent)
+            new_population.append(child)
+
+        distances = []
+        for i in range(len(self.population)):
+            for j in range(i+1, len(self.population)):
+                distances.append(self.genome_distance(
+                    self.population[i],
+                    self.population[j]
+                ))
+
+        mean_distance = np.mean(distances)
+        gen_stats["genome_diversity"] = mean_distance
+
+        self.population = new_population
+        self.fitness = np.zeros(self.population_size)
+        self.current_index = 0
+
+    # --------------------------------------------------------
+    # Mutation
+    # --------------------------------------------------------
+
+    def _mutate(self, genome):
+
+        genome["lr"] *= np.random.uniform(0.8, 1.2)
+        genome["gamma"] = np.clip(
+            genome["gamma"] + np.random.normal(0, 0.02),
+            0.8,
+            0.999
+        )
+        genome["weight_scale"] *= np.random.uniform(0.8, 1.2)
+        genome["exploration_center"] *= np.random.uniform(0.8, 1.2)
+        genome["exploration_bw"] *= np.random.uniform(0.8, 1.2)
+        genome["seed"] = np.random.randint(0, 1_000_000)
+
+        return genome
+    
+    def genome_distance(self, g1, g2):
+        keys = ["lr", "gamma", "weight_scale",
+                "exploration_center", "exploration_bw"]
+        return np.sqrt(sum((g1[k] - g2[k])**2 for k in keys))

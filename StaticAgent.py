@@ -31,9 +31,9 @@ class StaticAgent(Agent):
         bandwidth = (stop - start) / 2
         randShift = 0
         if rng == None:
-            randShift = random.randint(0, int(bandwidth)-1)
+            randShift = random.randint(0, 20) # About 1-2 MHz modulation
         else:
-            randShift = rng.integers(0, int(bandwidth)-1)
+            randShift = rng.integers(0, 20) # About 1-2 MHz modulation
         
         self.currentAction = (start+randShift, stop-randShift)
         
