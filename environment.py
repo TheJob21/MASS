@@ -28,9 +28,15 @@ policyClipFraction = 0.2 # epsilon
 numGradientEpochs = 10
 learningRate = 0.00025
 transmissionWeight = 1
-collisionWeight = 3.0 # 0 - 50 alpha_c
-bandwidthDistortionFactor = 0.0 # 0 - 1 Beta_bw
-centerDistortionFactor = 0.0 # 0 - 1 Beta_f_c
+beta = 0.05
+bandwidthDistortionFactor = beta # 0 - 1 Beta_bw
+centerDistortionFactor = beta # 0 - 1 Beta_f_c
+# ppo reward weights
+collisionTransmissionTolRatio = 0.0125 # for pulsed aversions
+collisionTransmissionTolRatio = 0.33 # for constant aversions Use worst reward for pulses, not effective in 2.4-2.5GHz live data
+collisionTransmissionTolRatio = 0.08 # effective in 2.4-2.5GHz live data,  Use worst reward for pulses
+# collisionTransmissionTolRatio = 0.04 # effective in 2.59-2.69GHz live data,  Use worst reward for pulses
+collisionWeight = (transmissionWeight / collisionTransmissionTolRatio) * (1 - beta) # 0 - 50 alpha_c
 
 # Radar system parameters
 startingFrequency = 2400 # MHz
@@ -106,8 +112,6 @@ def getLargestDeadSpaceInterval(prevState):
 
     return int(starts[idx]), int(ends[idx])
 
-
-# deadspaceCenterBw = []
 def computeRewardsForAgents(
     staticState,
     cognitiveAgents
@@ -145,131 +149,49 @@ def computeRewardsForAgents(
             left_overflow = max(0, -raw_start)
             right_overflow = max(0, raw_stop - fftSize)
             overflowAmount = (left_overflow + right_overflow) * binSize
-            overflow_frac = overflowAmount / channelBandwidth
             
             exec_start = max(0, raw_start)
             exec_stop = min(fftSize, raw_stop)
-            
+            amountTx = (exec_stop - exec_start) * binSize
+            txFrac = amountTx / channelBandwidth
             state = staticState.copy()
 
             # Interfering agents
             for cogAgent2 in cognitiveAgents:
-                if cogAgent2 != cogAgent and cogAgent2.isTransmitting:# and cogAgent2.isTransmitting:
+                if cogAgent2 != cogAgent and cogAgent2.isTransmitting:
                     state = updateStateInterval(state, cogAgent2.currentAction)
 
             collisionAmount = computeCollisions(
                 state, currAction
             ) * binSize # MHz
 
-            B_widest = getLargestDeadSpaceInterval(state) # Largest deadspace apart from own action
-            deadspaceCenter = 0.0
-            # transmitted - widest open bandwidth - collisionCount*collisionWeight(0-1)
-            widestOpenBandwidth = 0.0 # MHz
-            if B_widest is not None:
-                deadspaceCenter, deadspaceBw = intervalToCenterFreqBW(B_widest)
-                widestOpenBandwidth = (B_widest[1] - B_widest[0]) * binSize
-                # deadspaceCenterBw.append((deadspaceCenter, deadspaceBw))
+            collisionAmount += overflowAmount
+            collisionFraction = collisionAmount / channelBandwidth
             
+            cleanTxFrac = txFrac - collisionFraction
+            rewardSpectrum = transmissionWeight * cleanTxFrac - collisionWeight * collisionFraction
             
-            # alpha = 42 # 42, tiny doesn't move to avoid collisions well.
-            # transmissionReward = alpha * amountTx / max(widestOpenBandwidth, 1.0)
-            
-            # if collisionAmount == 0:
-            #     collisionReward = 2
-            # else:
-            #     collisionReward = -collisionWeight * collisionAmount
-            
-            # rewardSpectrum = transmissionReward + collisionReward
-            
-            # ----------TEMP WEIGHT CONTROLS-----------
-            transmissionWeight = 1.0
-            collisionWeight = 50.0 # 0 - 50 alpha_c
-            gamma = 35.0
-            
-            # Test
-            # fraction of ideal bandwidth used
-            transmissionFrac = amountTx / widestOpenBandwidth if widestOpenBandwidth > 0 else 0.0
-
-            # Reward for transmission fraction:
-            # - If frac <= 1: reward grows towards 1
-            # - If frac > 1: strong penalty (over-transmission)
-            if transmissionFrac <= 1:
-                transmissionReward = transmissionFrac
-            else:
-                overshoot = transmissionFrac - 1
-                transmissionReward = -overshoot
-            # if transmissionFrac <= 1:
-            #     transmissionReward = transmissionWeight * transmissionFrac
-            # else:
-            #     overshoot = transmissionFrac - 1
-            #     transmissionReward = transmissionWeight * (1 - 5 * overshoot**2)
-            # Collision fraction relative to actual transmission
-            # Combine Overflow with collision
-            collisionTxFrac = (collisionAmount + overflowAmount) / amountTx if amountTx > 0 else 0.0
-            collisionTotFrac = collisionAmount / channelBandwidth
-            # Strong multiplicative penalty for collisions
-            collisionReward = -collisionWeight * collisionTxFrac  # Negative reward
-
-            rewardSpectrum = transmissionReward + collisionReward
-                
-                
-            
-            # avgCenterFreq = cogAgent.getAveCenterFreqForPulse()
-            # avgBW = cogAgent.getAveBwForPulse()
+            avgCenterFreq = cogAgent.getAveCenterFreqForCPI()
+            avgBW = cogAgent.getAveBwForCPI()
             agentCenterFreq, agentBW = intervalToCenterFreqBW(currAction)
-            centerErrorFrac = abs(agentCenterFreq - deadspaceCenter) / channelBandwidth
-            # deltaBW = abs(agentBW - avgBW)
-            # deltaCenterFreq = abs(agentCenterFreq - avgCenterFreq)
+            deltaBW = abs(agentBW - avgBW)
+            deltaCenterFreq = abs(agentCenterFreq - avgCenterFreq)
             
-            # rewardAdapt = (bandwidthDistortionFactor * deltaBW / channelBandwidth) + (centerDistortionFactor * deltaCenterFreq / channelBandwidth)
+            rewardAdapt = (bandwidthDistortionFactor * deltaBW / channelBandwidth) + (centerDistortionFactor * deltaCenterFreq / channelBandwidth)
             
-            overflowPenalty = overflow_frac
-            
-            # ---------- Stable Reward Design ----------
-
-            # Transmission fraction (0 to potentially >1)
-            transmissionFrac = amountTx / widestOpenBandwidth if widestOpenBandwidth > 0 else 0.0
-
-            # Smooth saturation instead of hard cutoff
-            # Encourages using full gap but softly penalizes overshoot
-            # Bounded in (-1, 1)
-
-            # Collision fraction
-            collisionTxFrac = (collisionAmount + overflowAmount) / amountTx if amountTx > 0 else 0.0
-            collisionTotFrac = collisionAmount / channelBandwidth
-            
-            if collisionTxFrac > 0.1 or collisionTotFrac > .015:
-                reward = -1.0  # hard fail
-            else:
-                # --- 2. Transmission reward ---
-                if transmissionFrac <= 1:
-                    txReward = transmissionFrac
-                else:
-                    txReward = -2.0 * (transmissionFrac - 1)
-                txReward = max(-1.0, txReward)
-                
-                # Strong collision suppression (near-catastrophic)
-                collisionGate = (1 - collisionTxFrac)**3
-
-                # Center shaping (small)
-                centerPenalty = -(centerErrorFrac ** 2)
-
-
-                reward = (
-                    0.8 * txReward * collisionGate +
-                    0.2 * centerPenalty
-                )
             
             # Store Collision amount
             cogAgent.collisions.append(collisionAmount)
-            cogAgent.txFracs.append(transmissionFrac)
-            cogAgent.collFracs.append(collisionTxFrac)
-            cogAgent.centerErrorFracs.append(centerErrorFrac)
-            
-            # reward = rewardSpectrum - (gamma * (centerErrorFrac**2)) - (5.0 * overflowPenalty) #- rewardAdapt
+
+            reward = rewardSpectrum - rewardAdapt
 
         cogAgent.allRewards.append(reward)
         
+def worstReward(rewardMap, end_t, window=256):
+    return min(
+        rewardMap[t] if 0 <= t < len(rewardMap) else 0.0
+        for t in range(end_t - window, end_t)
+    )
 
 def sum_recent_rewards(rewardMap, end_t, window=256):
     """
@@ -402,18 +324,18 @@ def compute_state_from_file(f):
         mag,
         window_size=hoCaeWindowSize,
         k=hoCaeOrderSelection,
-        Pfa=1e-4
+        Pfa=1e-6
     )
     # Boolean occupancy state
     return mag > thresh
 
 currentState = staticState= initState(fftSize) # S
 occupiedBwPerIteration = []
-spectrumSampleSize=1_000
+spectrumSampleSize=10_000
 allStates = []
 deadspace = [] # MHz
 device = "cpu"
-seed = 1561
+seed = 3000
 staticAgentRNG = np.random.default_rng(seed)
 seed += 1
 randomStartAgentRNG = np.random.default_rng(seed)
@@ -429,7 +351,7 @@ torch.Generator(device=device).manual_seed(seed)
 allCogAgents = []
 
 # Static Agents For Simulating Environment
-numStaticAgents = 4
+numStaticAgents = 0
 staticAgents = []
 for staticAgent in range(numStaticAgents):
     staticAgents.append(StaticAgent(rng=staticAgentRNG))
@@ -443,7 +365,7 @@ for randAgent in range(numRandomStartAgents):
     allCogAgents.append(randomStartAgents[randAgent])
     
 # SAA Agent Parameters
-numSaaAgents = 0 # Sense-And-Avoid
+numSaaAgents = 1 # Sense-And-Avoid
 saaAgents = []
 for saaAgent in range(numSaaAgents):
     saaAgents.append(SAAAgent())
@@ -466,7 +388,7 @@ for bw in BANDWIDTHS:
         stop  = min(fftSize, start + bw)
         if stop - start == bw:
             DQN_ACTIONS.append((start, stop))
-numDqnAgents = 0
+numDqnAgents = 1
 dqnAgents = []
 for dqnAgent in range(numDqnAgents):
     dqnAgents.append(DQNAgent(fftSize=fftSize, actionList=DQN_ACTIONS, cpiLen=cpiLen, device=device))
@@ -474,7 +396,7 @@ for dqnAgent in range(numDqnAgents):
 
 # M-FOS Agent Initialization
 mfosBatchSize = 4
-numMfosAgents = 1
+numMfosAgents = 0
 mfosAgents = []
 gaLoops = []
 for mfosAgent in range(numMfosAgents):
@@ -495,15 +417,15 @@ for mfosAgent in range(numMfosAgents):
     gaLoops.append(ga)
     allCogAgents.append(mfosAgents[mfosAgent])
     
-#liveDataFilename = '../spectrum_245ghz.dat' # 2.4-2.5 GHz
-liveDataFilename = '../spectrum_264ghz.dat' # 2.59-2.69 GHz
+liveDataFilename = '../spectrum_245ghz.dat' # 2.4-2.5 GHz
+#liveDataFilename = '../spectrum_264ghz.dat' # 2.59-2.69 GHz
 storedStateFile = '../spectrum_245ghz.npz' if liveDataFilename == '../spectrum_245ghz.dat' else '../spectrum_264ghz.npz' # 2.4-2.5 GHz
 startingFrequency = 2400 if storedStateFile == '../spectrum_245ghz.npz' else 2590
 
 fileSize = os.path.getsize(liveDataFilename)
 
 # If precomputed file exists, just load it
-sim = True # Set False for live data
+sim = False # Set False for live data
 if not sim:
     if os.path.exists(storedStateFile):
         npz = np.load(storedStateFile)
@@ -524,9 +446,9 @@ if not sim:
         np.savez_compressed(storedStateFile, states=liveData)
         print("Saved precomputed states:", liveData.shape)
 
-iterations = 2_500_000 if sim else liveData.shape[0]
+iterations = 900_000 if sim else liveData.shape[0]
 eval = False
-timestep = pulseWidth = 12.8 if sim else 10.24
+timestep = pulseWidth = 10.24
 iterationsInPulse = int(pri / timestep)
 lastPulseStates = []
 for agent in allCogAgents:
@@ -548,7 +470,7 @@ for i in range(iterations): # 1 = 12.8 microseconds
     for idx, _ in enumerate(allCogAgents):
         prevStateWithoutAgent = staticState.copy()
         for idx2, agent2 in enumerate(allCogAgents):
-            if idx != idx2:
+            if idx != idx2 and agent2.isTransmitting:
                 prevStateWithoutAgent = updateStateInterval(prevStateWithoutAgent, agent2.currentAction)
         lastPulseStates[idx].append(prevStateWithoutAgent)
         
@@ -574,10 +496,11 @@ for i in range(iterations): # 1 = 12.8 microseconds
             if len(agentStates) == iterationsInPulse:
                 ppoAgent = ppoAgents[ppoAgentI]
                 obs_seq = np.stack(agentStates)
-                ppoAgent.select_action(obs_seq, eval_mode=eval)
+                ppoAgentActionAsState = updateStateInterval(initState(), ppoAgent.currentAction)
+                ppoAgent.select_action(obs_seq, ppoAgentActionAsState, eval_mode=eval)
                 ppoAgent.storeAction(intervalToCenterFreqBW(ppoAgent.currentAction))
     # Pulse lasts one iteration, then listens for PRI duration
-    if i % iterationsInPulse == 1:  
+    if i % iterationsInPulse == 1:
         for randomStartAgent in randomStartAgents:
             randomStartAgent.isTransmitting = False
         for ppoAgent in ppoAgents:
@@ -637,8 +560,8 @@ for i in range(iterations): # 1 = 12.8 microseconds
     
     # Update state
     for agent in allCogAgents:
-        # if agent.isTransmitting:
-        currentState = updateStateInterval(currentState, agent.currentAction)
+        if agent.isTransmitting:
+            currentState = updateStateInterval(currentState, agent.currentAction)
     occupiedBwPerIteration.append(np.sum(currentState) * binSize)
     
     # Only build labeled state for final sample size
@@ -663,12 +586,8 @@ for i in range(iterations): # 1 = 12.8 microseconds
     if not eval and i  % iterationsInPulse == 0 and len(lastPulseStates) > 0 and len(lastPulseStates[0]) == iterationsInPulse: # every 204.8 usec
         # Update PPO Agents
         for ppoAgent in ppoAgents:
-            reward = sum_recent_rewards(
-                ppoAgent.allRewards,
-                i,
-                window=iterationsInPulse
-            )
-
+            # reward = sum_recent_rewards(ppoAgent.allRewards, i, iterationsInPulse)
+            reward = worstReward(ppoAgent.allRewards, i, iterationsInPulse)
             ppoAgent.store_reward(
                 reward,
                 done=False
@@ -676,12 +595,8 @@ for i in range(iterations): # 1 = 12.8 microseconds
             ppoAgent.update()
         # Update DQN Agents
         for dqnAgent in dqnAgents:
-            reward = sum_recent_rewards(
-                dqnAgent.allRewards,
-                i,
-                window=iterationsInPulse
-            )
-
+            reward = sum_recent_rewards(dqnAgent.allRewards, i, window=iterationsInPulse)
+            reward = worstReward(dqnAgent.allRewards, i, iterationsInPulse)
             dqnAgent.buffer.push(
                 state_t,
                 action_idx,
@@ -692,11 +607,7 @@ for i in range(iterations): # 1 = 12.8 microseconds
             dqnAgent.train_step(rng=dqnAgentRNG)
         # Update M-FOS Agents  
         for mfosAgent in mfosAgents:
-            reward = sum_recent_rewards(
-                mfosAgent.allRewards,
-                i,
-                window=iterationsInPulse
-            )
+            reward = sum_recent_rewards(mfosAgent.allRewards, i, window=iterationsInPulse)
 
             # shaping_bonus = computeOpponentInstability(allCogAgents)
             # mfosAgent.record_fitness(reward + 0.1 * shaping_bonus)
@@ -719,7 +630,7 @@ for i in range(iterations): # 1 = 12.8 microseconds
 
                 # 2️⃣ If generation complete → evolve
                 if ga.is_generation_complete():
-                    print(f"Evolving MFOS Agent {idx} population...")
+                    print(f"Evolving MFOS Agent {idx+1} population...")
                     ga.evolve()
 
                 # 3️⃣ Assign next genome
@@ -838,28 +749,28 @@ plt.tight_layout()
 
 
 # Temp Plot
-plt.figure(figsize=(12, 8))
-block = 4096
+# plt.figure(figsize=(12, 8))
+# block = 4096
 
-for ppoAgent in range(numPpoAgents):
-    x, mean, std = mean_std_every_n(ppoAgents[ppoAgent].txFracs, block)
-    plt.plot(x, mean, label="PPO Agent Tx Fracs")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
+# for ppoAgent in range(numPpoAgents):
+#     x, mean, std = mean_std_every_n(ppoAgents[ppoAgent].txFracs, block)
+#     plt.plot(x, mean, label="PPO Agent Tx Fracs")
+#     plt.fill_between(x, mean - std, mean + std, alpha=0.25)
     
-    x, mean, std = mean_std_every_n(ppoAgents[ppoAgent].collFracs, block)
-    plt.plot(x, mean, label="PPO Agent Coll Fracs")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
+#     x, mean, std = mean_std_every_n(ppoAgents[ppoAgent].collFracs, block)
+#     plt.plot(x, mean, label="PPO Agent Coll Fracs")
+#     plt.fill_between(x, mean - std, mean + std, alpha=0.25)
     
-    x, mean, std = mean_std_every_n(ppoAgents[ppoAgent].centerErrorFracs, block)
-    plt.plot(x, mean, label="PPO Agent Center Error Fracs")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
+#     x, mean, std = mean_std_every_n(ppoAgents[ppoAgent].centerErrorFracs, block)
+#     plt.plot(x, mean, label="PPO Agent Center Error Fracs")
+#     plt.fill_between(x, mean - std, mean + std, alpha=0.25)
     
-plt.xlabel("Time Step (1 = 52,428.8 usec)")
-plt.ylabel("Fraction Amount (MHz)")
-plt.title("PPO Reward Stats")
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
+# plt.xlabel("Time Step (1 = 52,428.8 usec)")
+# plt.ylabel("Fraction Amount (MHz)")
+# plt.title("PPO Reward Stats")
+# plt.legend()
+# plt.grid(True)
+# plt.tight_layout()
 
 # Average BW usage per agent over time plot
 plt.figure(figsize=(12, 8))

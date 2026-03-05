@@ -1,5 +1,5 @@
 from Agent import Agent
-import numpy as np
+
 class CognitiveAgent(Agent):
     def __init__(self, currentAction=None, fftSize=1024, cpiLen=256):
         super().__init__(currentAction=currentAction, fftSize=fftSize)
@@ -7,40 +7,58 @@ class CognitiveAgent(Agent):
         self.allActions = [] # array of tuples (centerFreq (MHz), BW (MHz))
         self.collisions = [] # array of total frequency overlap in MHz
         self.allRewards = [] # array of reward per timestep
-        self.sumCenterFreqForPulse = 0
-        self.sumBwForPulse = 0
+        self.sumCenterFreqForCPI = 0
+        self.sumBwForCPI = 0
         self.isTransmitting = False
         
-        self.txFracs = []
-        self.collFracs = []
-        self.centerErrorFracs = []
+        # self.txFracs = []
+        # self.collFracs = []
+        # self.centerErrorFracs = []
     
     def storeAction(self, newAction):
         self.allActions.append(newAction)
         self.isTransmitting = False if newAction == None else True
         
         if len(self.allActions) % self.cpiLen == 0:
-            self.sumCenterFreqForPulse = 0
-            self.sumBwForPulse = 0
+            self.sumCenterFreqForCPI = 0
+            self.sumBwForCPI = 0
         else:
-            self.sumCenterFreqForPulse += newAction[0]
-            self.sumBwForPulse += newAction[1]
+            self.sumCenterFreqForCPI += newAction[0]
+            self.sumBwForCPI += newAction[1]
     
-    def getAveCenterFreqForPulse(self):
+    def getAveCenterFreqForCPI(self):
         if len(self.allActions) % self.cpiLen == 0:
             return 0
-        return self.sumCenterFreqForPulse / (len(self.allActions) % self.cpiLen)
+        return self.sumCenterFreqForCPI / (len(self.allActions) % self.cpiLen)
     
-    def getAveBwForPulse(self):
+    def getAveBwForCPI(self):
         if len(self.allActions) % self.cpiLen == 0:
             return 0
-        return self.sumBwForPulse / (len(self.allActions) % self.cpiLen)
+        return self.sumBwForCPI / (len(self.allActions) % self.cpiLen)
     
+    
+    @staticmethod
+    def continuous_action_to_interval(start_action, width_action, fftSize=1024):
+        """
+        start_action ∈ [-1, 1] → start bin in [0, fftSize]
+        width_action ∈ [-1, 1] → bandwidth in [0, fftSize - start]
+        No overflow possible, smooth everywhere.
+        """
+        start_bin = int(round((start_action + 1) / 2 * fftSize))
+        start_bin = max(0, min(fftSize, start_bin))
+
+        width_bins = int(round((width_action + 1) / 2 * (fftSize - start_bin)))
+        
+        stop_bin = start_bin + width_bins
+        stop_bin = max(0, min(fftSize, stop_bin))
+
+        return start_bin, stop_bin
+
     # ============================================================
     # Utility: Continuous → Interval
     # ============================================================
     @staticmethod   
-    def continuous_action_to_interval(center, bandwidth, fftSize=1024):
+    def continuous_action_to_interval1(center, bandwidth, fftSize=1024):
         """
         center ∈ [-1, 1]
         bandwidth ∈ [0, 1]  (but we do not enforce it)
