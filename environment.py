@@ -28,14 +28,16 @@ policyClipFraction = 0.2 # epsilon
 numGradientEpochs = 10
 learningRate = 0.00025
 transmissionWeight = 1
-beta = 0.05
+beta = 0.6
 bandwidthDistortionFactor = beta # 0 - 1 Beta_bw
 centerDistortionFactor = beta # 0 - 1 Beta_f_c
 # ppo reward weights
 collisionTransmissionTolRatio = 0.0125 # for pulsed aversions
 collisionTransmissionTolRatio = 0.33 # for constant aversions Use worst reward for pulses, not effective in 2.4-2.5GHz live data
 collisionTransmissionTolRatio = 0.08 # effective in 2.4-2.5GHz live data,  Use worst reward for pulses
-# collisionTransmissionTolRatio = 0.04 # effective in 2.59-2.69GHz live data,  Use worst reward for pulses
+collisionTransmissionTolRatio = 0.04 # effective in 2.59-2.69GHz live data,  Use worst reward for pulses
+collisionTransmissionTolRatio = 0.033 # Shane's recommendation 30 * collision
+
 collisionWeight = (transmissionWeight / collisionTransmissionTolRatio) * (1 - beta) # 0 - 50 alpha_c
 
 # Radar system parameters
@@ -135,8 +137,8 @@ def computeRewardsForAgents(
              
     for cogAgent in cognitiveAgents:
         currAction = cogAgent.currentAction
-        if currAction is None:
-            cogAgent.allRewards.append(0)
+        if currAction is None or not cogAgent.isTransmitting:
+            # cogAgent.allRewards.append(0)
             continue
         
         raw_start, raw_stop = currAction
@@ -209,23 +211,26 @@ def build_labeled_state(
     fftSize=1024
 ):
     state = np.zeros(fftSize, dtype=np.int8)
-    alpha_mask = np.ones(fftSize)
+    alpha_mask = np.zeros(fftSize)
     
     state[staticState] = 1
+    alpha_mask[staticState] = 1.0
     
     # Track occupancy count for collision detection
     occupied_counts = state.copy()
     
     label = 2
     for agent in listOfAgents:
-        if agent.currentAction != None:
+        if agent.currentAction is not None:
             s, e = agent.currentAction
-            state[s:e] = label
-            occupied_counts[s:e] += 1
             if agent.isTransmitting:
-                alpha_mask[s:e] = 1.0
-            else:
-                alpha_mask[s:e] = 0.3
+                occupied_counts[s:e] += 1
+            
+            transmit_mask = agent.isTransmitting | (alpha_mask[s:e] < 1.0)
+            
+            state[s:e][transmit_mask] = label
+            alpha_mask[s:e][transmit_mask] = 1.0 if agent.isTransmitting else 0.3
+
         label += 1
 
     # Collision override
@@ -322,7 +327,7 @@ def compute_state_from_file(f):
     # HO-CAE detection
     thresh, _ = HOCAE(
         mag,
-        window_size=hoCaeWindowSize,
+        window_size=64,
         k=hoCaeOrderSelection,
         Pfa=1e-6
     )
@@ -365,7 +370,7 @@ for randAgent in range(numRandomStartAgents):
     allCogAgents.append(randomStartAgents[randAgent])
     
 # SAA Agent Parameters
-numSaaAgents = 1 # Sense-And-Avoid
+numSaaAgents = 0 # Sense-And-Avoid
 saaAgents = []
 for saaAgent in range(numSaaAgents):
     saaAgents.append(SAAAgent())
@@ -417,8 +422,8 @@ for mfosAgent in range(numMfosAgents):
     gaLoops.append(ga)
     allCogAgents.append(mfosAgents[mfosAgent])
     
-liveDataFilename = '../spectrum_245ghz.dat' # 2.4-2.5 GHz
-#liveDataFilename = '../spectrum_264ghz.dat' # 2.59-2.69 GHz
+# liveDataFilename = '../spectrum_245ghz.dat' # 2.4-2.5 GHz
+liveDataFilename = '../spectrum_264ghz.dat' # 2.59-2.69 GHz
 storedStateFile = '../spectrum_245ghz.npz' if liveDataFilename == '../spectrum_245ghz.dat' else '../spectrum_264ghz.npz' # 2.4-2.5 GHz
 startingFrequency = 2400 if storedStateFile == '../spectrum_245ghz.npz' else 2590
 
@@ -475,7 +480,7 @@ for i in range(iterations): # 1 = 12.8 microseconds
         lastPulseStates[idx].append(prevStateWithoutAgent)
         
     # Generate actions for SAA agents
-    if i % iterationsInPulse == 8:
+    if i % iterationsInPulse == 0:
         for saaAgentI in range(numSaaAgents):
             saaAgent = saaAgents[saaAgentI]
             interval = getLargestDeadSpaceInterval(lastPulseStates[saaAgentI+numRandomStartAgents][-1])
@@ -483,7 +488,7 @@ for i in range(iterations): # 1 = 12.8 microseconds
             action = intervalToCenterFreqBW(interval)
             saaAgent.storeAction(action)
     # Pulse lasts one iteration, then listens for PRI duration
-    if i % iterationsInPulse == 9:  
+    if i % iterationsInPulse == 1:  
         for saaAgent in saaAgents:
             saaAgent.isTransmitting = False
             
@@ -496,8 +501,7 @@ for i in range(iterations): # 1 = 12.8 microseconds
             if len(agentStates) == iterationsInPulse:
                 ppoAgent = ppoAgents[ppoAgentI]
                 obs_seq = np.stack(agentStates)
-                ppoAgentActionAsState = updateStateInterval(initState(), ppoAgent.currentAction)
-                ppoAgent.select_action(obs_seq, ppoAgentActionAsState, eval_mode=eval)
+                ppoAgent.select_action(obs_seq, eval_mode=eval)
                 ppoAgent.storeAction(intervalToCenterFreqBW(ppoAgent.currentAction))
     # Pulse lasts one iteration, then listens for PRI duration
     if i % iterationsInPulse == 1:
@@ -507,7 +511,7 @@ for i in range(iterations): # 1 = 12.8 microseconds
             ppoAgent.isTransmitting = False
             
     # Generate actions for DQN agents
-    if i % iterationsInPulse == 4:
+    if i % iterationsInPulse == 0:
         for dqnAgentI in range(numDqnAgents):
             state_t = lastPulseStates[dqnAgentI + numRandomStartAgents + numSaaAgents + numPpoAgents][-1].astype(np.float32)
             dqnAgent = dqnAgents[dqnAgentI]
@@ -517,7 +521,7 @@ for i in range(iterations): # 1 = 12.8 microseconds
             action = intervalToCenterFreqBW(interval)
             dqnAgent.storeAction(action)
     # Pulse lasts one iteration, then listens for PRI duration
-    if i % iterationsInPulse == 5:  
+    if i % iterationsInPulse == 1:  
         for dqnAgent in dqnAgents:
             dqnAgent.isTransmitting = False
                 
@@ -527,7 +531,8 @@ for i in range(iterations): # 1 = 12.8 microseconds
             agentStates = lastPulseStates[mfosAgentI + numRandomStartAgents + numSaaAgents + numPpoAgents + numDqnAgents]
             if len(agentStates) == iterationsInPulse:
                 obs_seq = np.stack(agentStates)
-                mfosAgent.select_action(obs_seq)
+                mfosAgentActionAsState = updateStateInterval(initState(), mfosAgent.currentAction)
+                mfosAgent.select_action(obs_seq, mfosAgentActionAsState)
                 mfosAgent.storeAction(intervalToCenterFreqBW(mfosAgent.currentAction))
     # Pulse lasts one iteration, then listens for PRI duration
     if i % iterationsInPulse == 7:  
@@ -587,31 +592,30 @@ for i in range(iterations): # 1 = 12.8 microseconds
         # Update PPO Agents
         for ppoAgent in ppoAgents:
             # reward = sum_recent_rewards(ppoAgent.allRewards, i, iterationsInPulse)
-            reward = worstReward(ppoAgent.allRewards, i, iterationsInPulse)
             ppoAgent.store_reward(
-                reward,
+                ppoAgent.allRewards[-1],
                 done=False
             )
             ppoAgent.update()
         # Update DQN Agents
         for dqnAgent in dqnAgents:
-            reward = sum_recent_rewards(dqnAgent.allRewards, i, window=iterationsInPulse)
-            reward = worstReward(dqnAgent.allRewards, i, iterationsInPulse)
+            # reward = sum_recent_rewards(dqnAgent.allRewards, i, window=iterationsInPulse)
+            # reward = worstReward(dqnAgent.allRewards, i, iterationsInPulse)
             dqnAgent.buffer.push(
                 state_t,
                 action_idx,
-                reward,
+                dqnAgent.allRewards[-1],
                 currentState.astype(np.float32),
                 False
             )
             dqnAgent.train_step(rng=dqnAgentRNG)
         # Update M-FOS Agents  
         for mfosAgent in mfosAgents:
-            reward = sum_recent_rewards(mfosAgent.allRewards, i, window=iterationsInPulse)
+            # reward = sum_recent_rewards(mfosAgent.allRewards, i, window=iterationsInPulse)
 
             # shaping_bonus = computeOpponentInstability(allCogAgents)
             # mfosAgent.record_fitness(reward + 0.1 * shaping_bonus)
-            mfosAgent.record_reward(reward)
+            mfosAgent.record_reward(mfosAgent.allRewards[-1])
             
     if not eval:
         if i % (iterationsInPulse * 1000) == 0:
@@ -717,7 +721,7 @@ plt.grid(True)
 
 # Agent Reward Mean over time plot
 plt.figure(figsize=(12, 8))
-block = 4096
+block = cpiLen
 
 for randomStartAgent in range(numRandomStartAgents):
     x, mean, std = mean_std_every_n(randomStartAgents[randomStartAgent].allRewards, block)
@@ -774,7 +778,7 @@ plt.tight_layout()
 
 # Average BW usage per agent over time plot
 plt.figure(figsize=(12, 8))
-block = 256
+block = cpiLen
 
 for saaAgent in range(numSaaAgents):
     allActionsArr = np.array(saaAgents[saaAgent].allActions)
@@ -808,7 +812,7 @@ plt.tight_layout()
 
 # Average Collisions per agent over time plot
 plt.figure(figsize=(12, 8))
-block = 4096
+block = cpiLen
 
 for randomStartAgent in range(numRandomStartAgents):
     x, mean, std = mean_std_every_n(randomStartAgents[randomStartAgent].collisions, block)
@@ -840,7 +844,7 @@ plt.tight_layout()
 
 # Mean Missed Opportunity Bandwidth per Duty Cycle
 plt.figure(figsize=(12, 8))
-block = 4096
+block = cpiLen * iterationsInPulse
 
 x, mean, std = mean_std_every_n(deadspace, block)
 plt.plot(x, mean, label="Mean Deadspace")
@@ -855,7 +859,7 @@ plt.tight_layout()
 
 # Delta BW Per Agent Plot
 plt.figure(figsize=(12, 8))
-block = 256
+block = cpiLen
 
 for saaAgent in range(numSaaAgents):
     allActionsArr = np.array(saaAgents[saaAgent].allActions)
@@ -902,7 +906,7 @@ plt.tight_layout()
 
 # Delta Center Frequency Per Agent Plot
 plt.figure(figsize=(12, 8))
-block = 256
+block = cpiLen
 
 for saaAgent in range(numSaaAgents):
     allActionsArr = np.array(saaAgents[saaAgent].allActions)

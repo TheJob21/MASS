@@ -49,7 +49,7 @@ class MFOSAgent(CognitiveAgent, nn.Module):
         torch.manual_seed(self.genome["seed"])
 
         self.gru = nn.GRU(
-            input_size=self.fftSize,
+            input_size=self.fftSize*2,
             hidden_size=self.hidden_dim,
             batch_first=True
         )
@@ -84,15 +84,32 @@ class MFOSAgent(CognitiveAgent, nn.Module):
     # Select action
     # --------------------------------------------------------
 
-    def select_action(self, state_seq_np):
+    def select_action(self, state_seq_np, prevActionAsState):
 
-        state = torch.tensor(
+        state_tensor = torch.as_tensor(
             state_seq_np,
             dtype=torch.float32,
             device=self.device
-        ).unsqueeze(0)
+        )
+        
+        S = state_tensor.shape[0]
+        
+        # shape: (1, 1, samples_per_pulse, 1024)
+        action_tensor = torch.as_tensor(
+            prevActionAsState,
+            dtype=torch.float32,
+            device=self.device
+        )
+        # repeat for each snapshot
+        action_seq = action_tensor.unsqueeze(0).repeat(S, 1)  # (S,1024)
 
-        action, new_hidden = self.forward(state, self.hidden)
+        # concatenate spectrum + agent occupancy
+        state_with_action = torch.cat([state_tensor, action_seq], dim=-1)  # (S,2048)
+
+        # add batch/time dims
+        state_tensor = state_with_action.unsqueeze(0)
+
+        action, new_hidden = self.forward(state_tensor, self.hidden)
 
         if new_hidden is not None:
             self.hidden = new_hidden.detach()

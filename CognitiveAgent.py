@@ -10,6 +10,7 @@ class CognitiveAgent(Agent):
         self.sumCenterFreqForCPI = 0
         self.sumBwForCPI = 0
         self.isTransmitting = False
+        self.cpiIndex = 0
         
         # self.txFracs = []
         # self.collFracs = []
@@ -17,9 +18,12 @@ class CognitiveAgent(Agent):
     
     def storeAction(self, newAction):
         self.allActions.append(newAction)
+        self.cpiIndex += 1
+        if self.cpiIndex == self.cpiLen:
+            self.cpiIndex = 0
         self.isTransmitting = False if newAction == None else True
         
-        if len(self.allActions) % self.cpiLen == 0:
+        if self.cpiIndex == 0:
             self.sumCenterFreqForCPI = 0
             self.sumBwForCPI = 0
         else:
@@ -27,14 +31,14 @@ class CognitiveAgent(Agent):
             self.sumBwForCPI += newAction[1]
     
     def getAveCenterFreqForCPI(self):
-        if len(self.allActions) % self.cpiLen == 0:
+        if self.cpiIndex == 0:
             return 0
-        return self.sumCenterFreqForCPI / (len(self.allActions) % self.cpiLen)
+        return self.sumCenterFreqForCPI / self.cpiIndex
     
     def getAveBwForCPI(self):
-        if len(self.allActions) % self.cpiLen == 0:
+        if self.cpiIndex == 0:
             return 0
-        return self.sumBwForCPI / (len(self.allActions) % self.cpiLen)
+        return self.sumBwForCPI / self.cpiIndex
     
     
     @staticmethod
@@ -48,6 +52,7 @@ class CognitiveAgent(Agent):
         start_bin = max(0, min(fftSize, start_bin))
 
         width_bins = int(round((width_action + 1) / 2 * (fftSize - start_bin)))
+        width_bins = max(width_bins, 102)
         
         stop_bin = start_bin + width_bins
         stop_bin = max(0, min(fftSize, stop_bin))

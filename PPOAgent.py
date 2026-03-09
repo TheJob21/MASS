@@ -18,7 +18,7 @@ class RecurrentSpectrumPPO(nn.Module):
 
         
         # Intra-pulse encoder
-        self.embedding = nn.Linear(fftSize*2, d_model)
+        self.embedding = nn.Linear(fftSize, d_model)
         
         # ✅ Learnable positional encoding for 20 snapshots
         self.pos_embedding = nn.Parameter(
@@ -34,9 +34,10 @@ class RecurrentSpectrumPPO(nn.Module):
 
         self.attn_norm = nn.LayerNorm(d_model)
 
+
         # Temporal memory across decisions
         self.lstm = nn.LSTM(
-            input_size=d_model,
+            input_size=d_model + action_dim + 1, # Action and CPI Index added here
             hidden_size=lstm_hidden,
             batch_first=True
         )
@@ -64,22 +65,21 @@ class RecurrentSpectrumPPO(nn.Module):
         x = x + self.pos_embedding[:, :S, :]
         
         # Causal mask so snapshot t cannot see future snapshot
-        # mask = torch.triu(
-        #     torch.ones(S, S, device=x.device, dtype=torch.bool),
-        #     diagonal=1
-        # )
+        mask = torch.triu(
+            torch.ones(S, S, device=x.device, dtype=torch.bool),
+            diagonal=1
+        )
 
-        attn_out, _ = self.snapshot_attn(x, x, x)
+        attn_out, _ = self.snapshot_attn(x, x, x, attn_mask = mask)
 
         x = self.attn_norm(x + attn_out)
 
         # Compress 20 snapshots → single vector
-        #x = x.mean(dim=1)  # (B*T, d_model)
-        x = x[:, -1, :]
+        x = torch.max(x, dim=1).values  # (B*T, d_model)
         
         return x
 
-    def forward(self, pulse_seq_batch, hidden=None):
+    def forward(self, pulse_seq_batch, prevActions, cpiIndices, hidden=None):
         """
         pulse_seq_batch: (B, T, samples_per_pulse, 1024)
         """
@@ -93,7 +93,8 @@ class RecurrentSpectrumPPO(nn.Module):
         encoded = encoded.view(B, T, -1)               # (B, T, d_model)
 
         # ---- Then LSTM ----
-        lstm_out, hidden = self.lstm(encoded, hidden)
+        lstmInput = torch.cat([encoded, prevActions, cpiIndices], dim=-1)
+        lstm_out, hidden = self.lstm(lstmInput, hidden)
 
         mu = self.mu(lstm_out)
         log_std = self.log_std(lstm_out)
@@ -152,15 +153,18 @@ class PPOAgent(CognitiveAgent):
         self.dones = []
         self.hidden = None
         self.hiddens = []
+        self.batch_size = 8
         self.bptt_chunk = 64   # truncated BPTT length
         self.ret_rms_mean = 0.0
         self.ret_rms_var  = 1.0
         self.ret_rms_count = 0
+        self.prevActions = []
+        self.cpiIndices = []
         
     def resetHidden(self):
         self.hidden = None
 
-    def select_action(self, state_seq_np, prevActionAsState, eval_mode=False):
+    def select_action(self, state_seq_np, eval_mode=False):
         """
         state_seq_np: (samples_per_pulse, 1024)
         """
@@ -169,24 +173,30 @@ class PPOAgent(CognitiveAgent):
             state_seq_np,
             dtype=torch.float32,
             device=self.device
-        )
-        
-        S = state_tensor.shape[0]
+        ).unsqueeze(0).unsqueeze(0)
         
         # shape: (1, 1, samples_per_pulse, 1024)
-        action_tensor = torch.as_tensor(
-            prevActionAsState,
+        if self.currentAction is not None:
+            prev_action_tensor = torch.as_tensor(
+                [self.currentAction[0] / self.fftSize, self.currentAction[1] / self.fftSize],
+                dtype=torch.float32,
+                device=self.device
+            ).view(1, 1, 2)
+        else:
+            prev_action_tensor = torch.as_tensor(
+                [0, 0],
+                dtype=torch.float32,
+                device=self.device
+            ).view(1, 1, 2)
+        self.prevActions.append(prev_action_tensor)
+        
+        # store current CPI index
+        i_pulse_tensor = torch.tensor(
+            self.cpiIndex / self.cpiLen,  # normalized
             dtype=torch.float32,
             device=self.device
-        )
-        # repeat for each snapshot
-        action_seq = action_tensor.unsqueeze(0).repeat(S, 1)  # (S,1024)
-
-        # concatenate spectrum + agent occupancy
-        state_with_action = torch.cat([state_tensor, action_seq], dim=-1)  # (S,2048)
-
-        # add batch/time dims
-        state_tensor = state_with_action.unsqueeze(0).unsqueeze(0)
+        ).view(1, 1, 1)  # (B=1, T=1, 1)
+        self.cpiIndices.append(i_pulse_tensor)
         
         with torch.no_grad():
 
@@ -198,6 +208,8 @@ class PPOAgent(CognitiveAgent):
 
             mu, log_std, value, new_hidden = self.policy(
                 state_tensor,
+                prev_action_tensor,
+                i_pulse_tensor,
                 self.hidden
             )
 
@@ -256,26 +268,35 @@ class PPOAgent(CognitiveAgent):
         device = self.device
         H = len(self.rewards)
 
-        # ---------------------------------------------
+        # ------------------------------------------------
         # Stack rollout
-        # ---------------------------------------------
-        states = torch.cat(self.states, dim=0).to(device)        # (H, S, 1024)
-        actions = torch.cat(self.raw_actions, dim=0)  # (H, 2)
-        old_log_probs = torch.cat(self.log_probs, dim=0)
-        values = torch.cat(self.values, dim=0).squeeze(-1)
-
+        # ------------------------------------------------
+        states = torch.cat(self.states, dim=0).to(device)          # (H, S, 1024)
+        actions = torch.cat(self.raw_actions, dim=0)                # (H, 2)
+        old_log_probs = torch.cat(self.log_probs, dim=0)            # (H)
+        values = torch.cat(self.values, dim=0).squeeze(-1)          # (H)
+        prevActions = torch.cat(self.prevActions, dim=1)            # (H,2)
+        cpiIndices  = torch.cat(self.cpiIndices, dim=1)   # (H, 1)
+        
         rewards = torch.tensor(self.rewards, dtype=torch.float32, device=device)
         dones = torch.tensor(self.dones, dtype=torch.float32, device=device)
 
-        # ---------------------------------------------
-        # Compute GAE
-        # ---------------------------------------------
+        # ------------------------------------------------
+        # Compute bootstrap value
+        # ------------------------------------------------
         with torch.no_grad():
-            last_state = states[-1:].unsqueeze(0)
+
+            last_state = states[-1:].unsqueeze(0)  # (1,1,S,1024)
+            last_prevAction = prevActions[-1,-1, :].unsqueeze(0).unsqueeze(0)  # (1,1,2)
+            last_cpiIndex = cpiIndices[-1,-1, :].unsqueeze(0).unsqueeze(0)  # (1,1,1)
             last_hidden = self.hiddens[-1]
-            _, _, next_value, _ = self.policy(last_state, last_hidden)
+
+            _, _, next_value, _ = self.policy(last_state, last_prevAction, last_cpiIndex, last_hidden)
             next_value = next_value[:, -1].squeeze(-1)
 
+        # ------------------------------------------------
+        # GAE
+        # ------------------------------------------------
         advantages = torch.zeros_like(values)
         gae = 0
 
@@ -288,96 +309,104 @@ class PPOAgent(CognitiveAgent):
         returns = advantages + values
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        # ---------------------------------------------
-        # Recurrent PPO with truncated BPTT
-        # ---------------------------------------------
+        # ------------------------------------------------
+        # Convert rollout into sequences
+        # ------------------------------------------------
+        seq_len = self.bptt_chunk
+        num_seq = H // seq_len
+
+        if num_seq == 0:
+            return
+
+        usable = num_seq * seq_len
+
+        states = states[:usable]
+        actions = actions[:usable]
+        old_log_probs = old_log_probs[:usable]
+        advantages = advantages[:usable]
+        returns = returns[:usable]
+        prevActions = prevActions[:usable]
+        cpiIndices  = cpiIndices[:usable].view(num_seq, seq_len, -1)   # (N,T,1)
+        
+        states = states.view(num_seq, seq_len, *states.shape[1:])      # (N,T,S,1024)
+        actions = actions.view(num_seq, seq_len, -1)                   # (N,T,2)
+        old_log_probs = old_log_probs.view(num_seq, seq_len)
+        advantages = advantages.view(num_seq, seq_len)
+        returns = returns.view(num_seq, seq_len)
+        prevActions = prevActions.view(num_seq, seq_len, -1)           # (N,T,2)
+        cpiIndices = cpiIndices.view(num_seq, seq_len, -1)           # (N,T,2)
+
+        # ------------------------------------------------
+        # PPO training
+        # ------------------------------------------------
         for _ in range(self.num_epochs):
 
-            start = 0
+            perm = torch.randperm(num_seq, generator=self.torchRng)
 
-            while start < H:
+            for start in range(0, num_seq, self.batch_size):
 
-                end = min(start + self.bptt_chunk, H)
-                
-                hidden = self.hiddens[start]
+                idx = perm[start:start + self.batch_size]
 
-                state_chunk = states[start:end]     # (K, S, 1024)
-                action_chunk = actions[start:end]
-                old_log_chunk = old_log_probs[start:end]
-                adv_chunk = advantages[start:end]
-                return_chunk = returns[start:end]
-                done_chunk = dones[start:end]
+                state_batch = states[idx].to(device)           # (B,T,S,1024)
+                action_batch = actions[idx].to(device)
+                old_log_batch = old_log_probs[idx].to(device)
+                adv_batch = advantages[idx].to(device)
+                return_batch = returns[idx].to(device)
+                prev_batch = prevActions[idx].to(device)
+                cpiIndices_batch = cpiIndices[idx].to(device)
+                hidden = None
 
-                # add batch dimension
-                state_chunk = state_chunk.unsqueeze(0)  # (1,K,S,1024)
-
-                mu, log_std, value_pred, hidden = self.policy(
-                    state_chunk,
+                mu, log_std, value_pred, _ = self.policy(
+                    state_batch,
+                    prev_batch,
+                    cpiIndices_batch,
                     hidden
                 )
 
-                # reset hidden where episodes ended
-                if done_chunk.any():
-                    done_indices = (done_chunk == 1).nonzero(as_tuple=True)[0]
-                    for idx in done_indices:
-                        hidden = (
-                            hidden[0].clone(),
-                            hidden[1].clone()
-                        )
-                        hidden[0][:, idx+1:] = 0
-                        hidden[1][:, idx+1:] = 0
-                
-                # detach hidden for truncated BPTT
-                hidden = (
-                    hidden[0].detach(),
-                    hidden[1].detach()
-                )
-
-                mu = mu.squeeze(0)
-                log_std = torch.clamp(log_std.squeeze(0), -5, 1)
-                value_pred = value_pred.squeeze(0).squeeze(-1)
-
+                log_std = torch.clamp(log_std, -5, 1)
                 std = log_std.exp()
+
                 dist = NormalWithRNG(mu, std)
 
-                new_log_prob = dist.log_prob(action_chunk).sum(dim=-1)
+                new_log_prob = dist.log_prob(action_batch).sum(dim=-1)
 
-                tanh_action = torch.tanh(action_chunk)
+                tanh_action = torch.tanh(action_batch)
                 new_log_prob -= torch.log(
                     1 - tanh_action.pow(2) + 1e-6
                 ).sum(dim=-1)
 
-                ratio = torch.exp(new_log_prob - old_log_chunk)
+                ratio = torch.exp(new_log_prob - old_log_batch)
 
-                surr1 = ratio * adv_chunk
+                surr1 = ratio * adv_batch
                 surr2 = torch.clamp(
                     ratio,
                     1 - self.clip_eps,
                     1 + self.clip_eps
-                ) * adv_chunk
+                ) * adv_batch
 
                 policy_loss = -torch.min(surr1, surr2).mean()
-                value_loss = F.mse_loss(value_pred, return_chunk)
+
+                value_loss = F.mse_loss(
+                    value_pred.squeeze(-1),
+                    return_batch
+                )
+
                 entropy = dist.entropy().sum(dim=-1).mean()
-                
+
                 loss = policy_loss + value_loss - self.entropy_coef * entropy
 
                 self.optimizer.zero_grad()
                 loss.backward()
+
                 torch.nn.utils.clip_grad_norm_(
                     self.policy.parameters(), 0.5
                 )
+
                 self.optimizer.step()
 
-                start = end
-
-        # print("Entropy:", entropy.item())
-        # print("Value loss:", value_loss.item())
-        # print("Policy loss:", policy_loss.item())
-
-        # ---------------------------------------------
+        # ------------------------------------------------
         # Clear buffers
-        # ---------------------------------------------
+        # ------------------------------------------------
         self.states.clear()
         self.raw_actions.clear()
         self.log_probs.clear()
@@ -385,3 +414,5 @@ class PPOAgent(CognitiveAgent):
         self.rewards.clear()
         self.dones.clear()
         self.hiddens.clear()
+        self.prevActions.clear()
+        self.cpiIndices.clear()
