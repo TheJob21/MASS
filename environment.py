@@ -9,8 +9,9 @@ from SAAAgent import SAAAgent
 from PPOAgent import PPOAgent
 #from BetaPPOAgent import PPOAgent
 from DQNAgent import DQNAgent
+from DPGAgent import DPGAgent
 from RandomStartAgent import FixedStartAgent
-from MFOSAgent import MFOSAgent, GeneticAlgorithmOuterLoop
+from MFOSAgent import MFOSAgent
 from collections import deque
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
@@ -27,18 +28,20 @@ gaeParameter = 0.95 # lambda
 policyClipFraction = 0.2 # epsilon
 numGradientEpochs = 10
 learningRate = 0.00025
-transmissionWeight = 1
-beta = 0.6
-bandwidthDistortionFactor = beta # 0 - 1 Beta_bw
-centerDistortionFactor = beta # 0 - 1 Beta_f_c
+transmissionWeight = 1.2
+beta = 0.5
+bandwidthDistortionFactor = beta * .4 # 0 - 1 Beta_bw
+centerDistortionFactor = beta * .6 # 0 - 1 Beta_f_c
 # ppo reward weights
 collisionTransmissionTolRatio = 0.0125 # for pulsed aversions
 collisionTransmissionTolRatio = 0.33 # for constant aversions Use worst reward for pulses, not effective in 2.4-2.5GHz live data
 collisionTransmissionTolRatio = 0.08 # effective in 2.4-2.5GHz live data,  Use worst reward for pulses
-collisionTransmissionTolRatio = 0.04 # effective in 2.59-2.69GHz live data,  Use worst reward for pulses
-collisionTransmissionTolRatio = 0.033 # Shane's recommendation 30 * collision
-
-collisionWeight = (transmissionWeight / collisionTransmissionTolRatio) * (1 - beta) # 0 - 50 alpha_c
+# collisionTransmissionTolRatio = 0.04 # effective in 2.59-2.69GHz live data,  Use worst reward for pulses
+# collisionTransmissionTolRatio = 0.033 # Shane's recommendation 30 * collision
+# collisionTransmissionTolRatio = 0.0355
+# collisionWeight = 29
+collisionTransmissionTolRatio = .03
+collisionWeight = (transmissionWeight / collisionTransmissionTolRatio) #* (1 - beta) # 0 - 50 alpha_c
 
 # Radar system parameters
 startingFrequency = 2400 # MHz
@@ -137,55 +140,76 @@ def computeRewardsForAgents(
              
     for cogAgent in cognitiveAgents:
         currAction = cogAgent.currentAction
-        if currAction is None or not cogAgent.isTransmitting:
+        if currAction is None:
             # cogAgent.allRewards.append(0)
             continue
-        
+
         raw_start, raw_stop = currAction
         raw_bw_bins = raw_stop - raw_start
         amountTx = raw_bw_bins * binSize  # MHz
 
         reward = 0.0
         if raw_bw_bins > 0:
-            
-            left_overflow = max(0, -raw_start)
-            right_overflow = max(0, raw_stop - fftSize)
-            overflowAmount = (left_overflow + right_overflow) * binSize
-            
-            exec_start = max(0, raw_start)
-            exec_stop = min(fftSize, raw_stop)
-            amountTx = (exec_stop - exec_start) * binSize
-            txFrac = amountTx / channelBandwidth
-            state = staticState.copy()
+            if cogAgent.isTransmitting:
+                left_overflow = max(0, -raw_start)
+                right_overflow = max(0, raw_stop - fftSize)
+                overflowAmount = (left_overflow + right_overflow) * binSize
+                
+                exec_start = max(0, raw_start)
+                exec_stop = min(fftSize, raw_stop)
+                amountTx = (exec_stop - exec_start) * binSize
+                txFrac = amountTx / channelBandwidth
+                state = staticState.copy()
 
-            # Interfering agents
-            for cogAgent2 in cognitiveAgents:
-                if cogAgent2 != cogAgent and cogAgent2.isTransmitting:
-                    state = updateStateInterval(state, cogAgent2.currentAction)
+                # Interfering agents
+                if multiAgent:
+                    for cogAgent2 in cognitiveAgents:
+                        if cogAgent2 != cogAgent and cogAgent2.isTransmitting:
+                            state = updateStateInterval(state, cogAgent2.currentAction)
 
-            collisionAmount = computeCollisions(
-                state, currAction
-            ) * binSize # MHz
+                collisionAmount = computeCollisions(
+                    state, currAction
+                ) * binSize # MHz
 
-            collisionAmount += overflowAmount
-            collisionFraction = collisionAmount / channelBandwidth
-            
-            cleanTxFrac = txFrac - collisionFraction
-            rewardSpectrum = transmissionWeight * cleanTxFrac - collisionWeight * collisionFraction
-            
-            avgCenterFreq = cogAgent.getAveCenterFreqForCPI()
-            avgBW = cogAgent.getAveBwForCPI()
-            agentCenterFreq, agentBW = intervalToCenterFreqBW(currAction)
-            deltaBW = abs(agentBW - avgBW)
-            deltaCenterFreq = abs(agentCenterFreq - avgCenterFreq)
-            
-            rewardAdapt = (bandwidthDistortionFactor * deltaBW / channelBandwidth) + (centerDistortionFactor * deltaCenterFreq / channelBandwidth)
-            
-            
-            # Store Collision amount
-            cogAgent.collisions.append(collisionAmount)
+                # Store Collision amount
+                cogAgent.collisions.append(collisionAmount)
 
-            reward = rewardSpectrum - rewardAdapt
+                collisionAmount += overflowAmount
+                collisionFraction = collisionAmount / channelBandwidth
+                
+                cleanTxFrac = txFrac - collisionFraction
+                rewardSpectrum = transmissionWeight * cleanTxFrac - collisionWeight * collisionFraction
+                
+                avgCenterFreq = cogAgent.getAveCenterFreqForCPI()
+                avgBW = cogAgent.getAveBwForCPI()
+                agentCenterFreq, agentBW = intervalToCenterFreqBW(currAction)
+                deltaBW = abs(agentBW - avgBW)
+                deltaCenterFreq = abs(agentCenterFreq - avgCenterFreq)
+                
+                rewardAdapt = (bandwidthDistortionFactor * deltaBW / channelBandwidth) + (centerDistortionFactor * deltaCenterFreq / channelBandwidth)
+                
+                
+
+                reward = rewardSpectrum - rewardAdapt
+            else: # Listening but not transmitting
+                left_overflow = max(0, -raw_start)
+                right_overflow = max(0, raw_stop - fftSize)
+                overflowAmount = (left_overflow + right_overflow) * binSize
+                
+                state = staticState.copy()
+                # Interfering agents
+                if multiAgent:
+                    for cogAgent2 in cognitiveAgents:
+                        if cogAgent2 != cogAgent and cogAgent2.isTransmitting:
+                            state = updateStateInterval(state, cogAgent2.currentAction)
+
+                collisionAmount = computeCollisions(
+                    state, currAction
+                ) * binSize # MHz
+
+                collisionAmount += (overflowAmount)
+                collisionFraction = collisionAmount / (channelBandwidth)
+                reward -= (collisionFraction * (collisionWeight / 30))
 
         cogAgent.allRewards.append(reward)
         
@@ -223,6 +247,7 @@ def build_labeled_state(
     for agent in listOfAgents:
         if agent.currentAction is not None:
             s, e = agent.currentAction
+            s = max(s, 0)
             if agent.isTransmitting:
                 occupied_counts[s:e] += 1
             
@@ -317,6 +342,37 @@ def mean_std_every_n(rewards, n=4096):
     x = np.arange(len(mean)) * n
     return x, mean, std
 
+def fill_small_gaps(occupancy, max_gap=10):
+    filled = occupancy.copy()
+    n = len(occupancy)
+    
+    i = 0
+    while i < n:
+        if not occupancy[i]:
+            start = i
+            
+            # find end of gap
+            while i < n and not occupancy[i]:
+                i += 1
+            end = i
+            
+            gap_size = end - start
+            
+            # check if bounded by True on both sides
+            left = start - 1
+            right = end
+            
+            if (
+                gap_size <= max_gap and
+                left >= 0 and right < n and
+                occupancy[left] and occupancy[right]
+            ):
+                filled[start:end] = True
+        else:
+            i += 1
+
+    return filled
+
 def compute_state_from_file(f):
     data = np.fromfile(f, dtype=np.complex64, count=fftSize)
     if data.size < fftSize:
@@ -327,12 +383,16 @@ def compute_state_from_file(f):
     # HO-CAE detection
     thresh, _ = HOCAE(
         mag,
-        window_size=64,
+        window_size=32,
         k=hoCaeOrderSelection,
-        Pfa=1e-6
+        Pfa=1e-2
     )
     # Boolean occupancy state
-    return mag > thresh
+    occupancy = mag > thresh
+
+    occupancy = fill_small_gaps(occupancy=occupancy, max_gap=10)
+
+    return occupancy
 
 currentState = staticState= initState(fftSize) # S
 occupiedBwPerIteration = []
@@ -340,7 +400,7 @@ spectrumSampleSize=10_000
 allStates = []
 deadspace = [] # MHz
 device = "cpu"
-seed = 3000
+seed = 4279
 staticAgentRNG = np.random.default_rng(seed)
 seed += 1
 randomStartAgentRNG = np.random.default_rng(seed)
@@ -362,7 +422,7 @@ for staticAgent in range(numStaticAgents):
     staticAgents.append(StaticAgent(rng=staticAgentRNG))
 
 # Random Single Action Agent
-numRandomStartAgents = 0
+numRandomStartAgents = 1
 randomStartAgents = []
 for randAgent in range(numRandomStartAgents):
     randomStartAgents.append(FixedStartAgent(rng=randomStartAgentRNG))
@@ -370,14 +430,14 @@ for randAgent in range(numRandomStartAgents):
     allCogAgents.append(randomStartAgents[randAgent])
     
 # SAA Agent Parameters
-numSaaAgents = 0 # Sense-And-Avoid
+numSaaAgents = 1 # Sense-And-Avoid
 saaAgents = []
 for saaAgent in range(numSaaAgents):
     saaAgents.append(SAAAgent())
     allCogAgents.append(saaAgents[saaAgent])
     
 # PPO Agent Parameters
-numPpoAgents = 0 # Proximal Policy Optimization
+numPpoAgents = 1 # Proximal Policy Optimization
 ppoAgents = []
 for ppoAgent in range(numPpoAgents):
     ppoAgents.append(PPOAgent(fftSize=fftSize, cpiLen=cpiLen, device=device, seed=ppoSeed+ppoAgent))
@@ -400,27 +460,39 @@ for dqnAgent in range(numDqnAgents):
     allCogAgents.append(dqnAgents[dqnAgent])
 
 # M-FOS Agent Initialization
-mfosBatchSize = 4
-numMfosAgents = 0
+numMfosAgents = 1
 mfosAgents = []
-gaLoops = []
-for mfosAgent in range(numMfosAgents):
+for mfosAgentI in range(numMfosAgents):
     base_genome = {
-        "seed": seed+mfosAgent,
-        "weight_scale": 0.7,
-        "lr": 3e-4,
-        "gamma": 0.95,
-        "exploration_center": 0.1,
-        "exploration_bw": 0.05
+        "seed": 228409,#seed+mfosAgentI,
+        "weight_scale": 1.26,
+        "lr": 5e-4,
+        "gamma": 0.885,
+        "exploration_center": 0.073,
+        "exploration_bw": 0.106,
+        "entropy_coef": .0008
     }
-    ga = GeneticAlgorithmOuterLoop(
-        population_size=10,
-        base_genome=base_genome
+    # base_genome = None
+    mfosAgent = MFOSAgent(
+        population_size=5,
+        base_genome=base_genome,
+        mutation_scale=0.05,
+        elite_fraction=.4,
+        fresh_fraction=0.2,
+        seed=seed + mfosAgentI + 1,
+        device=device,
+        fftSize=fftSize,
+        cpiLen=cpiLen
     )
-    genome = ga.get_current_genome()
-    mfosAgents.append(MFOSAgent(genome=genome, device=device, fftSize=fftSize, cpiLen=cpiLen))
-    gaLoops.append(ga)
-    allCogAgents.append(mfosAgents[mfosAgent])
+    mfosAgents.append(mfosAgent)
+    allCogAgents.append(mfosAgent)
+
+# DPG Agent Initialization
+numDpgAgents = 0
+dpgAgents = []
+for i in range(numDpgAgents):
+    dpgAgents.append(DPGAgent(fftSize=fftSize, device=device))
+    allCogAgents.append(dpgAgents[i])
     
 # liveDataFilename = '../spectrum_245ghz.dat' # 2.4-2.5 GHz
 liveDataFilename = '../spectrum_264ghz.dat' # 2.59-2.69 GHz
@@ -452,6 +524,8 @@ if not sim:
         print("Saved precomputed states:", liveData.shape)
 
 iterations = 900_000 if sim else liveData.shape[0]
+multiAgent = False
+# iterations *= 3
 eval = False
 timestep = pulseWidth = 10.24
 iterationsInPulse = int(pri / timestep)
@@ -468,27 +542,30 @@ for i in range(iterations): # 1 = 12.8 microseconds
         for dqnAgent in dqnAgents:
             dqnAgent.policy.eval()
             dqnAgent.epsilon = 0.0
+        for mfosAgent in mfosAgents:
+            mfosAgent.set_eval_mode()
+            
     if i % 100_000 == 0:
         print(int(i/1000), "K iterations completed.")
     
     # store previous state space without the active agents action
     for idx, _ in enumerate(allCogAgents):
         prevStateWithoutAgent = staticState.copy()
-        for idx2, agent2 in enumerate(allCogAgents):
-            if idx != idx2 and agent2.isTransmitting:
-                prevStateWithoutAgent = updateStateInterval(prevStateWithoutAgent, agent2.currentAction)
+        if multiAgent:
+            for idx2, agent2 in enumerate(allCogAgents):
+                if idx != idx2 and agent2.isTransmitting:
+                    prevStateWithoutAgent = updateStateInterval(prevStateWithoutAgent, agent2.currentAction)
         lastPulseStates[idx].append(prevStateWithoutAgent)
         
     # Generate actions for SAA agents
-    if i % iterationsInPulse == 0:
+    if i % iterationsInPulse == 1:
         for saaAgentI in range(numSaaAgents):
             saaAgent = saaAgents[saaAgentI]
             interval = getLargestDeadSpaceInterval(lastPulseStates[saaAgentI+numRandomStartAgents][-1])
             saaAgent.currentAction = interval
             action = intervalToCenterFreqBW(interval)
             saaAgent.storeAction(action)
-    # Pulse lasts one iteration, then listens for PRI duration
-    if i % iterationsInPulse == 1:  
+    if i % iterationsInPulse == 2: # Pulse lasts one iteration, then listens for PRI duration
         for saaAgent in saaAgents:
             saaAgent.isTransmitting = False
             
@@ -503,8 +580,7 @@ for i in range(iterations): # 1 = 12.8 microseconds
                 obs_seq = np.stack(agentStates)
                 ppoAgent.select_action(obs_seq, eval_mode=eval)
                 ppoAgent.storeAction(intervalToCenterFreqBW(ppoAgent.currentAction))
-    # Pulse lasts one iteration, then listens for PRI duration
-    if i % iterationsInPulse == 1:
+    if i % iterationsInPulse == 1: # Pulse lasts one iteration, then listens for PRI duration
         for randomStartAgent in randomStartAgents:
             randomStartAgent.isTransmitting = False
         for ppoAgent in ppoAgents:
@@ -520,24 +596,36 @@ for i in range(iterations): # 1 = 12.8 microseconds
             dqnAgent.currentAction = interval
             action = intervalToCenterFreqBW(interval)
             dqnAgent.storeAction(action)
-    # Pulse lasts one iteration, then listens for PRI duration
-    if i % iterationsInPulse == 1:  
+    if i % iterationsInPulse == 1: # Pulse lasts one iteration, then listens for PRI duration
         for dqnAgent in dqnAgents:
             dqnAgent.isTransmitting = False
-                
-    if i % iterationsInPulse == 6:
+
+    # M-FOS agent action selection         
+    if i % iterationsInPulse == 0:
         for mfosAgentI in range(numMfosAgents):
             mfosAgent = mfosAgents[mfosAgentI]
             agentStates = lastPulseStates[mfosAgentI + numRandomStartAgents + numSaaAgents + numPpoAgents + numDqnAgents]
             if len(agentStates) == iterationsInPulse:
                 obs_seq = np.stack(agentStates)
-                mfosAgentActionAsState = updateStateInterval(initState(), mfosAgent.currentAction)
-                mfosAgent.select_action(obs_seq, mfosAgentActionAsState)
+                mfosAgent.select_action(obs_seq)
                 mfosAgent.storeAction(intervalToCenterFreqBW(mfosAgent.currentAction))
-    # Pulse lasts one iteration, then listens for PRI duration
-    if i % iterationsInPulse == 7:  
+    if i % iterationsInPulse == 1: # Pulse lasts one iteration, then listens for PRI duration
         for mfosAgent in mfosAgents:
             mfosAgent.isTransmitting = False
+
+    # DPG Agent action selection
+    if i % iterationsInPulse == 0: # every 204.8 usec
+        for dpgAgentI in range(numDpgAgents):
+            agentStates = lastPulseStates[dpgAgentI + numRandomStartAgents + numSaaAgents + numPpoAgents + numDqnAgents + numMfosAgents]
+            if len(agentStates) == iterationsInPulse:
+                state_dpg = agentStates[-1].astype(np.float32)
+                dpgAgent = dpgAgents[dpgAgentI]
+                obs_seq = np.stack(agentStates)
+                dpgAgent.select_action(obs_seq, eval_mode=eval)
+                dpgAgent.storeAction(intervalToCenterFreqBW(dpgAgent.currentAction))
+    if i % iterationsInPulse == 1: # Pulse lasts one iteration, then listens for PRI duration
+        for dpgAgent in dpgAgents:
+            dpgAgent.isTransmitting = False
 
             
     # Static Agent Actions. Simulate frequency changes
@@ -559,14 +647,15 @@ for i in range(iterations): # 1 = 12.8 microseconds
         currentState = updateStateInterval(currentState, staticAgent.currentAction)
     
     if sim == False: # Use Live Data
-        currentState = currentState | liveData[i]
+        currentState = currentState | liveData[i%len(liveData)]
         
     staticState = currentState.copy()
     
     # Update state
-    for agent in allCogAgents:
-        if agent.isTransmitting:
-            currentState = updateStateInterval(currentState, agent.currentAction)
+    if multiAgent:
+        for agent in allCogAgents:
+            if agent.isTransmitting:
+                currentState = updateStateInterval(currentState, agent.currentAction)
     occupiedBwPerIteration.append(np.sum(currentState) * binSize)
     
     # Only build labeled state for final sample size
@@ -588,59 +677,61 @@ for i in range(iterations): # 1 = 12.8 microseconds
         cognitiveAgents=allCogAgents
     )
     
-    if not eval and i  % iterationsInPulse == 0 and len(lastPulseStates) > 0 and len(lastPulseStates[0]) == iterationsInPulse: # every 204.8 usec
+    if not eval and i  % iterationsInPulse == iterationsInPulse-1 and len(lastPulseStates) > 0 and len(lastPulseStates[0]) == iterationsInPulse: # every 204.8 usec
         # Update PPO Agents
         for ppoAgent in ppoAgents:
-            # reward = sum_recent_rewards(ppoAgent.allRewards, i, iterationsInPulse)
-            ppoAgent.store_reward(
-                ppoAgent.allRewards[-1],
-                done=False
-            )
-            ppoAgent.update()
+            if ppoAgent.currentAction is not None:
+                reward = sum_recent_rewards(ppoAgent.allRewards, i, iterationsInPulse)
+                ppoAgent.store_reward(
+                    reward,
+                    done=False
+                )
+                ppoAgent.update()
         # Update DQN Agents
         for dqnAgent in dqnAgents:
-            # reward = sum_recent_rewards(dqnAgent.allRewards, i, window=iterationsInPulse)
-            # reward = worstReward(dqnAgent.allRewards, i, iterationsInPulse)
             dqnAgent.buffer.push(
                 state_t,
                 action_idx,
-                dqnAgent.allRewards[-1],
+                sum_recent_rewards(dqnAgent.allRewards, i, window=iterationsInPulse),
                 currentState.astype(np.float32),
                 False
             )
             dqnAgent.train_step(rng=dqnAgentRNG)
         # Update M-FOS Agents  
         for mfosAgent in mfosAgents:
-            # reward = sum_recent_rewards(mfosAgent.allRewards, i, window=iterationsInPulse)
+            reward = sum_recent_rewards(mfosAgent.allRewards, i, window=iterationsInPulse)
+            mfosAgent.record_reward(reward)
+            mfosAgent.update()
 
-            # shaping_bonus = computeOpponentInstability(allCogAgents)
-            # mfosAgent.record_fitness(reward + 0.1 * shaping_bonus)
-            mfosAgent.record_reward(mfosAgent.allRewards[-1])
+        # Update DPG Agents:
+        for dpgAgent in dpgAgents:
+            reward = sum_recent_rewards(dpgAgent.allRewards, i, window=iterationsInPulse)
+            dpgAgent.buffer.push(
+                state_dpg,
+                dpgAgent.lastAction,
+                reward,
+                currentState.astype(np.float32),
+                False
+            )
+
+            dpgAgent.train_step()
             
     if not eval:
         if i % (iterationsInPulse * 1000) == 0:
             for dqnAgent in dqnAgents:
                 dqnAgent.target.load_state_dict(dqnAgent.policy.state_dict())
-    
-        if i % 10_000 == 0 and i > 0 and not eval:
-            for idx, mfosAgent in enumerate(mfosAgents):
+        
+        if i % (cpiLen * iterationsInPulse * 8) == 0 and i > 0:
+            for mfosAgent in mfosAgents:
 
-                ga = gaLoops[idx]
-
-                # 1️⃣ Record fitness
-                ga.record_fitness(mfosAgent.fitness)
-
-                mfosAgent.fitness = 0.0
+                mfosAgent.finish_individual()
 
                 # 2️⃣ If generation complete → evolve
-                if ga.is_generation_complete():
+                if mfosAgent.is_generation_complete():
+                    best = np.argmax(mfosAgent.fitness)
+                    print("Best genome:", mfosAgent.population[best].genome)
                     print(f"Evolving MFOS Agent {idx+1} population...")
-                    ga.evolve()
-
-                # 3️⃣ Assign next genome
-                new_genome = ga.get_current_genome()
-                mfosAgent.set_genome(new_genome)
-                    
+                    mfosAgent.evolve()
       
 liveData = None
                     
@@ -656,7 +747,9 @@ for dqnAgent in range(numDqnAgents):
     print("DQN Agent", dqnAgent+1 if dqnAgent > 0 else "", cumulativeRewardString, sum(dqnAgents[dqnAgent].allRewards[int(len(dqnAgents[dqnAgent].allRewards)*.8):]))
 for mfosAgent in range(numMfosAgents):
     print("M-FOS Agent", mfosAgent+1 if mfosAgent > 0 else "", cumulativeRewardString, sum(mfosAgents[mfosAgent].allRewards[int(len(mfosAgents[mfosAgent].allRewards)*.8):]))
-         
+for dpgAgent in range(numDpgAgents):
+    print("DPG Agent", dpgAgent+1 if dpgAgent > 0 else "", cumulativeRewardString, sum(dpgAgents[dpgAgent].allRewards[int(len(dpgAgents[dpgAgent].allRewards)*.8):]))
+          
 
 # Spectrum Usage and collisions per agent over time 
 states_list, alphas_list = zip(*allStates)
@@ -664,7 +757,7 @@ stateMatrix = np.stack(states_list)
 alphaMatrix = np.stack(alphas_list)
 
 colors = []
-colorCount = numRandomStartAgents + numSaaAgents + numPpoAgents + numDqnAgents + numMfosAgents + 3
+colorCount = numRandomStartAgents + numSaaAgents + numPpoAgents + numDqnAgents + numMfosAgents + numDpgAgents + 3
 
 cmap = build_agent_colormap(colorCount)
 bounds = []
@@ -704,6 +797,8 @@ for dqnAgent in range(numDqnAgents):
     tickLabels.append("DQN " + (str(dqnAgent + 1) if dqnAgent > 0 else ""))
 for mfosAgent in range(numMfosAgents):
     tickLabels.append("M-FOS " + (str(mfosAgent + 1) if mfosAgent > 0 else ""))
+for dpgAgent in range(numDpgAgents):
+    tickLabels.append("DPG " + (str(dpgAgent + 1) if dpgAgent > 0 else ""))
 tickLabels.append("Collision")
 
 cbar.ax.set_yticklabels(tickLabels)
@@ -721,7 +816,7 @@ plt.grid(True)
 
 # Agent Reward Mean over time plot
 plt.figure(figsize=(12, 8))
-block = cpiLen
+block = cpiLen * iterationsInPulse
 
 for randomStartAgent in range(numRandomStartAgents):
     x, mean, std = mean_std_every_n(randomStartAgents[randomStartAgent].allRewards, block)
@@ -743,7 +838,11 @@ for mfosAgent in range(numMfosAgents):
     x, mean, std = mean_std_every_n(mfosAgents[mfosAgent].allRewards, block)
     plt.plot(x, mean, label=f"M-FOS Agent {mfosAgent+1}")
     plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-    
+for dpgAgent in range(numDpgAgents):
+    x, mean, std = mean_std_every_n(dpgAgents[dpgAgent].allRewards, block)
+    plt.plot(x, mean, label=f"DPG Agent {dpgAgent+1}")
+    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
+        
 plt.xlabel("Time Step (1=52,428.8 usec = 1 CPI)")
 plt.ylabel("Mean Reward")
 plt.title("Mean Reward Over Time")
@@ -800,6 +899,11 @@ for mfosAgent in range(numMfosAgents):
     x, mean, std = mean_std_every_n(allActionsArr[:, 1], block)
     plt.plot(x, mean, label=f"M-FOS Agent {mfosAgent+1}")
     plt.fill_between(x, mean - std, mean + std, alpha=0.25)
+for dpgAgent in range(numDpgAgents):
+    allActionsArr = np.array(dpgAgents[dpgAgent].allActions)
+    x, mean, std = mean_std_every_n(allActionsArr[:, 1], block)
+    plt.plot(x, mean, label=f"DPG Agent {dpgAgent+1}")
+    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
     
 plt.xlabel("Time Step (1 = 52,428.8 usec)")
 plt.ylabel("Mean Bandwidth (MHz)")
@@ -833,6 +937,10 @@ for dqnAgent in range(numDqnAgents):
 for mfosAgent in range(numMfosAgents):
     x, mean, std = mean_std_every_n(mfosAgents[mfosAgent].collisions, block)
     plt.plot(x, mean, label=f"M-FOS Agent {mfosAgent+1}")
+    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
+for dpgsAgent in range(numDpgAgents):
+    x, mean, std = mean_std_every_n(dpgAgents[dpgAgent].collisions, block)
+    plt.plot(x, mean, label=f"DPG Agent {dpgAgent+1}")
     plt.fill_between(x, mean - std, mean + std, alpha=0.25)
     
 plt.xlabel("Time Step (1 = 52,428.8 usec = 1 CPI)")
@@ -896,6 +1004,15 @@ for mfosAgent in range(numMfosAgents):
     x, mean, std = mean_std_every_n(diffs, block)
     plt.plot(x, mean, label=f"M-FOS Agent {mfosAgent+1}")
     plt.fill_between(x, mean - std, mean + std, alpha=0.25)
+
+for dpgAgent in range(numDpgAgents):
+    allActionsArr = np.array(dpgAgents[dpgAgent].allActions)
+    bandwidth = allActionsArr[:, 1]
+    diffs = np.abs(np.diff(bandwidth))
+
+    x, mean, std = mean_std_every_n(diffs, block)
+    plt.plot(x, mean, label=f"DPG Agent {dpgAgent+1}")
+    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
     
 plt.xlabel("Time Step (1 = 52,428.8 usec = 1 CPI)")
 plt.ylabel("Mean |Δ Bandwidth| (MHz)")
@@ -943,7 +1060,16 @@ for mfosAgent in range(numMfosAgents):
     x, mean, std = mean_std_every_n(diffs, block)
     plt.plot(x, mean, label=f"M-FOS Agent {mfosAgent+1}")
     plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-    
+
+for dpgAgent in range(numDpgAgents):
+    allActionsArr = np.array(dpgAgents[dpgAgent].allActions)
+    centerFreq = allActionsArr[:, 0]
+    diffs = np.abs(np.diff(centerFreq))
+
+    x, mean, std = mean_std_every_n(diffs, block)
+    plt.plot(x, mean, label=f"DPG Agent {dpgAgent+1}")
+    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
+        
 plt.xlabel("Time Step (1 = 52,428.8 usec = 1 CPI)")
 plt.ylabel("Mean |Δ Center Frequency| (MHz)")
 plt.title("Average Center Frequency Change Over Time")

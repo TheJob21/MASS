@@ -112,13 +112,19 @@ class PPOAgent(CognitiveAgent):
         gamma=0.95,
         lam=0.95,
         clip_eps=0.2,
-        lr=2.5e-4,
+        lr=5e-4,
+        lr_decay=True,
+        lr_decay_steps=2000,
+        lr_min=-1e-5,
         num_epochs=10,
-        entropy_coef=0.03,
+        entropy_coef=0.001,
+        entropy_decay=0.995,
+        entropy_min=0.002,
         horizon=1024,
         seed=None
     ):
         super().__init__(currentAction, fftSize, cpiLen)
+
         # Initialize Weights of Critic
         self.torchRng = torch.Generator(device=device)
         if policy is None:
@@ -141,9 +147,22 @@ class PPOAgent(CognitiveAgent):
         self.clip_eps = clip_eps
         self.num_epochs = num_epochs
         self.entropy_coef = entropy_coef
+        self.entropy_decay = entropy_decay
+        self.entropy_min = entropy_min
         self.horizon = horizon
+        self.base_lr = lr
+        self.lr_min=lr_min
+        self.lr_decay = lr_decay
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=lr)
-        
+        if lr_decay:
+            self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer,
+                T_max=lr_decay_steps,
+                eta_min=lr_min
+            )
+        else:
+            self.scheduler = None
+
         # Rollout buffers
         self.states = []
         self.raw_actions = []
@@ -153,8 +172,8 @@ class PPOAgent(CognitiveAgent):
         self.dones = []
         self.hidden = None
         self.hiddens = []
-        self.batch_size = 8
-        self.bptt_chunk = 64   # truncated BPTT length
+        self.batch_size = 16
+        self.bptt_chunk = 32   # truncated BPTT length
         self.ret_rms_mean = 0.0
         self.ret_rms_var  = 1.0
         self.ret_rms_count = 0
@@ -219,7 +238,7 @@ class PPOAgent(CognitiveAgent):
             )
 
             mu = mu[:, -1]
-            log_std = torch.clamp(log_std[:, -1], -5, 1)
+            log_std = torch.clamp(log_std[:, -1], -3, 0)
             value = value[:, -1]
 
             std = log_std.exp()
@@ -339,6 +358,8 @@ class PPOAgent(CognitiveAgent):
         # ------------------------------------------------
         # PPO training
         # ------------------------------------------------
+        entropy_total = 0
+        entropy_count = 0
         for _ in range(self.num_epochs):
 
             perm = torch.randperm(num_seq, generator=self.torchRng)
@@ -363,7 +384,7 @@ class PPOAgent(CognitiveAgent):
                     hidden
                 )
 
-                log_std = torch.clamp(log_std, -5, 1)
+                log_std = torch.clamp(log_std, -3, 0)
                 std = log_std.exp()
 
                 dist = NormalWithRNG(mu, std)
@@ -386,12 +407,14 @@ class PPOAgent(CognitiveAgent):
 
                 policy_loss = -torch.min(surr1, surr2).mean()
 
-                value_loss = F.mse_loss(
+                value_loss = 0.5 * F.mse_loss(
                     value_pred.squeeze(-1),
                     return_batch
                 )
 
                 entropy = dist.entropy().sum(dim=-1).mean()
+                entropy_total += entropy.item()
+                entropy_count += 1
 
                 loss = policy_loss + value_loss - self.entropy_coef * entropy
 
@@ -404,6 +427,14 @@ class PPOAgent(CognitiveAgent):
 
                 self.optimizer.step()
 
+                if self.scheduler is not None:
+                    self.scheduler.step()
+
+                self.entropy_coef = max(
+                    self.entropy_coef * self.entropy_decay,
+                    self.entropy_min
+                )
+        print("Entropy:", entropy_total / entropy_count)
         # ------------------------------------------------
         # Clear buffers
         # ------------------------------------------------

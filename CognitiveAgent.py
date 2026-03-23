@@ -42,7 +42,7 @@ class CognitiveAgent(Agent):
     
     
     @staticmethod
-    def continuous_action_to_interval(start_action, width_action, fftSize=1024):
+    def continuous_action_to_interval1(start_action, width_action, fftSize=1024):
         """
         start_action ∈ [-1, 1] → start bin in [0, fftSize]
         width_action ∈ [-1, 1] → bandwidth in [0, fftSize - start]
@@ -63,7 +63,7 @@ class CognitiveAgent(Agent):
     # Utility: Continuous → Interval
     # ============================================================
     @staticmethod   
-    def continuous_action_to_interval1(center, bandwidth, fftSize=1024):
+    def continuous_action_to_interval(center, bandwidth, fftSize=1024):
         """
         center ∈ [-1, 1]
         bandwidth ∈ [0, 1]  (but we do not enforce it)
@@ -74,6 +74,7 @@ class CognitiveAgent(Agent):
 
         # --- Convert bandwidth to bins (no clipping) ---
         bw_bins = int(round(bandwidth * fftSize))
+        bw_bins = max(bw_bins, 102) # min 10 MHz
 
         # --- Convert center to bin index (no clipping) ---
         center_bin = (center + 1.0) * 0.5 * (fftSize - 1)
