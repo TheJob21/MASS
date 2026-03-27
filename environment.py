@@ -119,7 +119,8 @@ def getLargestDeadSpaceInterval(prevState):
 
 def computeRewardsForAgents(
     staticState,
-    cognitiveAgents
+    cognitiveAgents,
+    binOwnership
 ):
     """
     Generic reward computation for any agent group.
@@ -151,33 +152,35 @@ def computeRewardsForAgents(
         reward = 0.0
         if raw_bw_bins > 0:
             if cogAgent.isTransmitting:
+
+                agent_id = cognitiveAgents.index(cogAgent) + 2
+
                 left_overflow = max(0, -raw_start)
                 right_overflow = max(0, raw_stop - fftSize)
-                overflowAmount = (left_overflow + right_overflow) * binSize
+                overflow_bins = left_overflow + right_overflow
                 
                 exec_start = max(0, raw_start)
                 exec_stop = min(fftSize, raw_stop)
-                amountTx = (exec_stop - exec_start) * binSize
-                txFrac = amountTx / channelBandwidth
-                state = staticState.copy()
+                
+                ownership_slice = binOwnership[exec_start:exec_stop]
 
-                # Interfering agents
-                if multiAgent:
-                    for cogAgent2 in cognitiveAgents:
-                        if cogAgent2 != cogAgent and cogAgent2.isTransmitting:
-                            state = updateStateInterval(state, cogAgent2.currentAction)
+                total_bins = exec_stop - exec_start
+                owned_mask = (ownership_slice == agent_id)
+                owned_bins = np.sum(owned_mask)
+                collision_bins = total_bins - owned_bins
+                # Add overflow as collision
+                collision_bins += overflow_bins
 
-                collisionAmount = computeCollisions(
-                    state, currAction
-                ) * binSize # MHz
+                txFrac = (total_bins * binSize) / channelBandwidth
+                collisionFrac = (collision_bins * binSize) / channelBandwidth
+
+                cleanTxFrac = max(0.0, txFrac - collisionFrac)
+
+                
 
                 # Store Collision amount
-                cogAgent.collisions.append(collisionAmount)
+                cogAgent.collisions.append(collision_bins * binSize)
 
-                collisionAmount += overflowAmount
-                collisionFraction = collisionAmount / channelBandwidth
-                
-                cleanTxFrac = txFrac - collisionFraction
                 rewardSpectrum = transmissionWeight * cleanTxFrac - collisionWeight * collisionFraction
                 
                 avgCenterFreq = cogAgent.getAveCenterFreqForCPI()
@@ -299,6 +302,91 @@ def intervalToCenterFreqBW(interval):
     centerFreq = startingFrequency + ((binSize * interval[0]) + (intervalBW / 2)) # MHz
     return (centerFreq, intervalBW)
 
+def updateBinOwnership(binOwnership, staticState, cognitiveAgents):
+    """
+    Simultaneous ownership update with:
+    - Static priority
+    - Single-claim wins
+    - Multi-claim resolved via previous ownership
+    - Release of bins when agents leave
+
+    Parameters
+    ----------
+    binOwnership : np.ndarray[int]
+        Ownership map (modified in-place)
+    staticState : np.ndarray[bool]
+        Static occupancy (True = owned by static)
+    cognitiveAgents : list
+        Each agent must have:
+            - currentAction: (start, stop) or None
+
+    Returns
+    -------
+    None
+    """
+
+    # -------------------------------
+    # Step 0: copy previous ownership
+    # -------------------------------
+    prevOwnership = binOwnership.copy()
+
+    # -------------------------------
+    # Step 1: reset to static baseline
+    # -------------------------------
+    binOwnership[:] = 0
+    binOwnership[staticState] = 1  # static always wins
+
+    # -------------------------------
+    # Step 2: build claim map
+    # -------------------------------
+    claim_counts = np.zeros(fftSize, dtype=np.int32)
+    claimants = [[] for _ in range(fftSize)]
+
+    for idx, agent in enumerate(cognitiveAgents):
+        if agent.currentAction is None:
+            continue
+
+        start, stop = agent.currentAction
+        start = max(0, start)
+        stop = min(fftSize, stop)
+
+        if start >= stop:
+            continue
+
+        agent_id = idx + 2  # reserve 0,1
+
+        for i in range(start, stop):
+            claim_counts[i] += 1
+            claimants[i].append(agent_id)
+
+    # -------------------------------
+    # Step 3: resolve ownership
+    # -------------------------------
+    for i in range(fftSize):
+
+        # Static always dominates
+        if staticState[i]:
+            continue
+
+        if claim_counts[i] == 1:
+            # Only one agent → gets ownership
+            binOwnership[i] = claimants[i][0]
+
+        elif claim_counts[i] > 1:
+            # Multiple agents → check previous ownership
+            prev_owner = prevOwnership[i]
+
+            if prev_owner >= 2 and prev_owner in claimants[i]:
+                # Previous owner retains control
+                binOwnership[i] = prev_owner
+            else:
+                # True simultaneous collision → no owner
+                binOwnership[i] = 0
+
+        else:
+            # No one claims → stays 0 (released)
+            pass
+
 def HOCAE(frame, window_size, k, Pfa):
     '''
     Implementation of the HO-CAE algorithm for spectrum detections.
@@ -394,7 +482,7 @@ def compute_state_from_file(f):
 
     return occupancy
 
-currentState = staticState= initState(fftSize) # S
+currentState = staticState = initState(fftSize) # S
 occupiedBwPerIteration = []
 spectrumSampleSize=30_000
 allStates = []
@@ -559,6 +647,8 @@ lastPulseStates = []
 for agent in allCogAgents:
     lastPulseStates.append(deque(maxlen=iterationsInPulse))
 
+binOwnership = np.zeros(fftSize, dtype=np.int8) # 0=unowned, 1=staticOwner, 2+=cogUser
+
 
 # main loop
 for i in range(iterations): # 1 = 12.8 microseconds
@@ -690,10 +780,17 @@ for i in range(iterations): # 1 = 12.8 microseconds
     else: 
         deadspace.append((deadSpaceInterval[1] - deadSpaceInterval[0]) * binSize)
     
+    binOwnership = updateBinOwnership(
+        binOwnership=binOwnership, 
+        staticState=staticState, 
+        cognitiveAgents=allCogAgents
+    )
+
     # Compute reward for cognitive agents
     computeRewardsForAgents(
         staticState=staticState,
-        cognitiveAgents=allCogAgents
+        cognitiveAgents=allCogAgents,
+        binOwnership=binOwnership
     )
     
     if not eval and i  % iterationsInPulse == iterationsInPulse-1 and len(lastPulseStates) > 0 and len(lastPulseStates[0]) == iterationsInPulse: # every 204.8 usec
