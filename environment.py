@@ -11,7 +11,7 @@ from PPOAgent import PPOAgent
 from DQNAgent import DQNAgent
 from DPGAgent import DPGAgent
 from RandomStartAgent import FixedStartAgent
-from MFOSAgent import MFOSAgent
+from MFOSAgent2 import MFOSAgent
 from collections import deque
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
@@ -28,10 +28,10 @@ gaeParameter = 0.95 # lambda
 policyClipFraction = 0.2 # epsilon
 numGradientEpochs = 10
 learningRate = 0.00025
-transmissionWeight = 1.2
+transmissionWeight = 1
 beta = 0.5
-bandwidthDistortionFactor = beta * .4 # 0 - 1 Beta_bw
-centerDistortionFactor = beta * .6 # 0 - 1 Beta_f_c
+bandwidthDistortionFactor = beta # 0 - 1 Beta_bw
+centerDistortionFactor = beta # 0 - 1 Beta_f_c
 # ppo reward weights
 collisionTransmissionTolRatio = 0.0125 # for pulsed aversions
 collisionTransmissionTolRatio = 0.33 # for constant aversions Use worst reward for pulses, not effective in 2.4-2.5GHz live data
@@ -40,7 +40,7 @@ collisionTransmissionTolRatio = 0.08 # effective in 2.4-2.5GHz live data,  Use w
 # collisionTransmissionTolRatio = 0.033 # Shane's recommendation 30 * collision
 # collisionTransmissionTolRatio = 0.0355
 # collisionWeight = 29
-collisionTransmissionTolRatio = .03
+collisionTransmissionTolRatio = .0275
 collisionWeight = (transmissionWeight / collisionTransmissionTolRatio) #* (1 - beta) # 0 - 50 alpha_c
 
 # Radar system parameters
@@ -396,11 +396,11 @@ def compute_state_from_file(f):
 
 currentState = staticState= initState(fftSize) # S
 occupiedBwPerIteration = []
-spectrumSampleSize=10_000
+spectrumSampleSize=30_000
 allStates = []
 deadspace = [] # MHz
 device = "cpu"
-seed = 4279
+seed = 42069
 staticAgentRNG = np.random.default_rng(seed)
 seed += 1
 randomStartAgentRNG = np.random.default_rng(seed)
@@ -413,88 +413,9 @@ mfosSeed=seed
 seed += 1
 torch.Generator(device=device).manual_seed(seed)
 
-allCogAgents = []
 
-# Static Agents For Simulating Environment
-numStaticAgents = 0
-staticAgents = []
-for staticAgent in range(numStaticAgents):
-    staticAgents.append(StaticAgent(rng=staticAgentRNG))
-
-# Random Single Action Agent
-numRandomStartAgents = 1
-randomStartAgents = []
-for randAgent in range(numRandomStartAgents):
-    randomStartAgents.append(FixedStartAgent(rng=randomStartAgentRNG))
-    randomStartAgents[randAgent].storeAction(intervalToCenterFreqBW(randomStartAgents[randAgent].currentAction))
-    allCogAgents.append(randomStartAgents[randAgent])
     
-# SAA Agent Parameters
-numSaaAgents = 1 # Sense-And-Avoid
-saaAgents = []
-for saaAgent in range(numSaaAgents):
-    saaAgents.append(SAAAgent())
-    allCogAgents.append(saaAgents[saaAgent])
-    
-# PPO Agent Parameters
-numPpoAgents = 1 # Proximal Policy Optimization
-ppoAgents = []
-for ppoAgent in range(numPpoAgents):
-    ppoAgents.append(PPOAgent(fftSize=fftSize, cpiLen=cpiLen, device=device, seed=ppoSeed+ppoAgent))
-    allCogAgents.append(ppoAgents[ppoAgent])
-
-# DQN Agent Parameters
-BANDWIDTHS = [32, 64, 96]
-CENTERS = np.linspace(0, fftSize-1, 32, dtype=int)
-DQN_ACTIONS = []
-for bw in BANDWIDTHS:
-    for c in CENTERS:
-        start = max(0, c - bw // 2)
-        stop  = min(fftSize, start + bw)
-        if stop - start == bw:
-            DQN_ACTIONS.append((start, stop))
-numDqnAgents = 1
-dqnAgents = []
-for dqnAgent in range(numDqnAgents):
-    dqnAgents.append(DQNAgent(fftSize=fftSize, actionList=DQN_ACTIONS, cpiLen=cpiLen, device=device))
-    allCogAgents.append(dqnAgents[dqnAgent])
-
-# M-FOS Agent Initialization
-numMfosAgents = 1
-mfosAgents = []
-for mfosAgentI in range(numMfosAgents):
-    base_genome = {
-        "seed": 228409,#seed+mfosAgentI,
-        "weight_scale": 1.26,
-        "lr": 5e-4,
-        "gamma": 0.885,
-        "exploration_center": 0.073,
-        "exploration_bw": 0.106,
-        "entropy_coef": .0008
-    }
-    # base_genome = None
-    mfosAgent = MFOSAgent(
-        population_size=5,
-        base_genome=base_genome,
-        mutation_scale=0.05,
-        elite_fraction=.4,
-        fresh_fraction=0.2,
-        seed=seed + mfosAgentI + 1,
-        device=device,
-        fftSize=fftSize,
-        cpiLen=cpiLen
-    )
-    mfosAgents.append(mfosAgent)
-    allCogAgents.append(mfosAgent)
-
-# DPG Agent Initialization
-numDpgAgents = 0
-dpgAgents = []
-for i in range(numDpgAgents):
-    dpgAgents.append(DPGAgent(fftSize=fftSize, device=device))
-    allCogAgents.append(dpgAgents[i])
-    
-# liveDataFilename = '../spectrum_245ghz.dat' # 2.4-2.5 GHz
+liveDataFilename = '../spectrum_245ghz.dat' # 2.4-2.5 GHz
 liveDataFilename = '../spectrum_264ghz.dat' # 2.59-2.69 GHz
 storedStateFile = '../spectrum_245ghz.npz' if liveDataFilename == '../spectrum_245ghz.dat' else '../spectrum_264ghz.npz' # 2.4-2.5 GHz
 startingFrequency = 2400 if storedStateFile == '../spectrum_245ghz.npz' else 2590
@@ -502,7 +423,7 @@ startingFrequency = 2400 if storedStateFile == '../spectrum_245ghz.npz' else 259
 fileSize = os.path.getsize(liveDataFilename)
 
 # If precomputed file exists, just load it
-sim = False # Set False for live data
+sim = True # Set False for live data
 if not sim:
     if os.path.exists(storedStateFile):
         npz = np.load(storedStateFile)
@@ -523,15 +444,121 @@ if not sim:
         np.savez_compressed(storedStateFile, states=liveData)
         print("Saved precomputed states:", liveData.shape)
 
-iterations = 900_000 if sim else liveData.shape[0]
-multiAgent = False
+iterations = 100_000 if sim else liveData.shape[0]
+multiAgent = True
 # iterations *= 3
 eval = False
 timestep = pulseWidth = 10.24
 iterationsInPulse = int(pri / timestep)
+
+allCogAgents = []
+
+# Static Agents For Simulating Environment
+staticAgents = []
+numLargeAgents = 2 # pw .1 - .25K, interval 10K, 150-175 bins wide
+numSkinnyAgents = 3 # pw .25K, interval 2K, 20 bins wide
+numPulsedAgents = 5 # pw .1K, interval = 4K, 30-40 bins wide on/off
+numRectangleAgents = 2 # pw = 50, interval = 10 -250,  60-680 bins
+numStaticAgents = numLargeAgents + numSkinnyAgents + numPulsedAgents + numRectangleAgents
+for staticAgent in range(numLargeAgents):
+    staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=0))
+for staticAgent in range(numSkinnyAgents):
+    staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=1))
+for staticAgent in range(numPulsedAgents):
+    staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=2))
+for staticAgent in range(numRectangleAgents):
+    staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=3))
+
+# Random Single Action Agent
+numRandomStartAgents = 0
+randomStartAgents = []
+randomStartAgentStartIndices = []
+for randAgent in range(numRandomStartAgents):
+    randomStartAgents.append(FixedStartAgent(rng=randomStartAgentRNG))
+    randomStartAgents[randAgent].storeAction(intervalToCenterFreqBW(randomStartAgents[randAgent].currentAction))
+    randomStartAgentStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+    allCogAgents.append(randomStartAgents[randAgent])
+
+    
+# SAA Agent Parameters
+numSaaAgents = 0 # Sense-And-Avoid
+saaAgents = []
+saaAgentStartIndices = []
+for saaAgent in range(numSaaAgents):
+    saaAgents.append(SAAAgent())
+    saaAgentStartIndices.append(0)#torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+    allCogAgents.append(saaAgents[saaAgent])
+    
+# PPO Agent Parameters
+numPpoAgents = 0 # Proximal Policy Optimization
+ppoAgents = []
+ppoAgentStartIndices = []
+for ppoAgent in range(numPpoAgents):
+    ppoAgents.append(PPOAgent(fftSize=fftSize, cpiLen=cpiLen, device=device, seed=ppoSeed+ppoAgent))
+    ppoAgentStartIndices.append(0)#torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+    allCogAgents.append(ppoAgents[ppoAgent])
+
+# DQN Agent Parameters
+BANDWIDTHS = [32, 64, 96]
+CENTERS = np.linspace(0, fftSize-1, 32, dtype=int)
+DQN_ACTIONS = []
+for bw in BANDWIDTHS:
+    for c in CENTERS:
+        start = max(0, c - bw // 2)
+        stop  = min(fftSize, start + bw)
+        if stop - start == bw:
+            DQN_ACTIONS.append((start, stop))
+numDqnAgents = 0
+dqnAgents = []
+dqnAgentStartIndices = []
+for dqnAgent in range(numDqnAgents):
+    dqnAgents.append(DQNAgent(fftSize=fftSize, actionList=DQN_ACTIONS, cpiLen=cpiLen, device=device))
+    dqnAgentStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+    allCogAgents.append(dqnAgents[dqnAgent])
+
+# M-FOS Agent Initialization
+numMfosAgents = 0
+mfosAgents = []
+mfosAgentStartIndices = []
+for mfosAgentI in range(numMfosAgents):
+    base_genome = {
+        "seed": mfosSeed+mfosAgentI,
+        "weight_scale": 1.26,
+        "lr": 5e-4,
+        "gamma": 0.885,
+        "exploration_center": 0.073,
+        "exploration_bw": 0.106,
+        "entropy_coef": .0008
+    }
+    # base_genome = None
+    mfosAgent = MFOSAgent(
+        population_size=5,
+        base_genome=None,#base_genome,
+        mutation_scale=0.05,
+        elite_fraction=.4,
+        fresh_fraction=0.2,
+        seed=seed + mfosAgentI + 1,
+        device=device,
+        fftSize=fftSize,
+        cpiLen=cpiLen
+    )
+    mfosAgents.append(mfosAgent)
+    mfosAgentStartIndices.append(0)#torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+    allCogAgents.append(mfosAgent)
+
+# DPG Agent Initialization
+numDpgAgents = 0
+dpgAgents = []
+dpgAgentStartIndices = []
+for i in range(numDpgAgents):
+    dpgAgents.append(DPGAgent(fftSize=fftSize, device=device))
+    dpgAgentStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+    allCogAgents.append(dpgAgents[i])
+
 lastPulseStates = []
 for agent in allCogAgents:
     lastPulseStates.append(deque(maxlen=iterationsInPulse))
+
 
 # main loop
 for i in range(iterations): # 1 = 12.8 microseconds
@@ -558,37 +585,39 @@ for i in range(iterations): # 1 = 12.8 microseconds
         lastPulseStates[idx].append(prevStateWithoutAgent)
         
     # Generate actions for SAA agents
-    if i % iterationsInPulse == 1:
-        for saaAgentI in range(numSaaAgents):
+    for saaAgentI in range(numSaaAgents):
+        if i % iterationsInPulse == saaAgentStartIndices[saaAgentI]:
             saaAgent = saaAgents[saaAgentI]
             interval = getLargestDeadSpaceInterval(lastPulseStates[saaAgentI+numRandomStartAgents][-1])
             saaAgent.currentAction = interval
             action = intervalToCenterFreqBW(interval)
             saaAgent.storeAction(action)
-    if i % iterationsInPulse == 2: # Pulse lasts one iteration, then listens for PRI duration
-        for saaAgent in saaAgents:
-            saaAgent.isTransmitting = False
-            
+        elif i % iterationsInPulse == ((saaAgentStartIndices[saaAgentI]+1) % iterationsInPulse): # Pulse lasts one iteration, then listens for PRI duration
+            saaAgents[saaAgentI].isTransmitting = False
+          
+    # Generate actions for Random Start agents  
+    for randomStartAgentI in range(numRandomStartAgents):
+        if i % iterationsInPulse == randomStartAgentStartIndices[randomStartAgentI]: # every 204.8 usec
+            randomStartAgents[randomStartAgentI].storeAction(intervalToCenterFreqBW( randomStartAgents[randomStartAgentI].currentAction))
+        elif i % iterationsInPulse == ((randomStartAgentStartIndices[randomStartAgentI]+1) % iterationsInPulse): # Pulse lasts one iteration, then listens for PRI duration
+            randomStartAgents[randomStartAgentI].isTransmitting = False
+
     # Generate actions for PPO agents
-    if i % iterationsInPulse == 0: # every 204.8 usec
-        for randomStartAgent in randomStartAgents:
-            randomStartAgent.storeAction(intervalToCenterFreqBW(randomStartAgent.currentAction))
-        for ppoAgentI in range(numPpoAgents):
+    for ppoAgentI in range(numPpoAgents):
+        if i % iterationsInPulse == ppoAgentStartIndices[ppoAgentI]: # every 204.8 usec
             agentStates = lastPulseStates[ppoAgentI + numRandomStartAgents + numSaaAgents]
             if len(agentStates) == iterationsInPulse:
                 ppoAgent = ppoAgents[ppoAgentI]
                 obs_seq = np.stack(agentStates)
                 ppoAgent.select_action(obs_seq, eval_mode=eval)
                 ppoAgent.storeAction(intervalToCenterFreqBW(ppoAgent.currentAction))
-    if i % iterationsInPulse == 1: # Pulse lasts one iteration, then listens for PRI duration
-        for randomStartAgent in randomStartAgents:
-            randomStartAgent.isTransmitting = False
-        for ppoAgent in ppoAgents:
-            ppoAgent.isTransmitting = False
+        elif i % iterationsInPulse == ((ppoAgentStartIndices[ppoAgentI]+1) % iterationsInPulse): # Pulse lasts one iteration, then listens for PRI duration
+            ppoAgents[ppoAgentI].isTransmitting = False
+
             
     # Generate actions for DQN agents
-    if i % iterationsInPulse == 0:
-        for dqnAgentI in range(numDqnAgents):
+    for dqnAgentI in range(numDqnAgents):
+        if i % iterationsInPulse == dqnAgentStartIndices[dqnAgentI]:
             state_t = lastPulseStates[dqnAgentI + numRandomStartAgents + numSaaAgents + numPpoAgents][-1].astype(np.float32)
             dqnAgent = dqnAgents[dqnAgentI]
             action_idx = dqnAgent.select_action(state_t, rng=dqnAgentRNG, eval_mode=eval)
@@ -596,26 +625,24 @@ for i in range(iterations): # 1 = 12.8 microseconds
             dqnAgent.currentAction = interval
             action = intervalToCenterFreqBW(interval)
             dqnAgent.storeAction(action)
-    if i % iterationsInPulse == 1: # Pulse lasts one iteration, then listens for PRI duration
-        for dqnAgent in dqnAgents:
-            dqnAgent.isTransmitting = False
+        elif i % iterationsInPulse == ((dqnAgentStartIndices[dqnAgentI]+1) % iterationsInPulse):
+            dqnAgents[dqnAgentI].isTransmitting = False
 
-    # M-FOS agent action selection         
-    if i % iterationsInPulse == 0:
-        for mfosAgentI in range(numMfosAgents):
+    # M-FOS agent action selection   
+    for mfosAgentI in range(numMfosAgents):      
+        if i % iterationsInPulse == mfosAgentStartIndices[mfosAgentI]:
             mfosAgent = mfosAgents[mfosAgentI]
             agentStates = lastPulseStates[mfosAgentI + numRandomStartAgents + numSaaAgents + numPpoAgents + numDqnAgents]
             if len(agentStates) == iterationsInPulse:
                 obs_seq = np.stack(agentStates)
                 mfosAgent.select_action(obs_seq)
                 mfosAgent.storeAction(intervalToCenterFreqBW(mfosAgent.currentAction))
-    if i % iterationsInPulse == 1: # Pulse lasts one iteration, then listens for PRI duration
-        for mfosAgent in mfosAgents:
-            mfosAgent.isTransmitting = False
+        elif i % iterationsInPulse == ((mfosAgentStartIndices[mfosAgentI]+1) % iterationsInPulse):
+            mfosAgents[mfosAgentI].isTransmitting = False
 
     # DPG Agent action selection
-    if i % iterationsInPulse == 0: # every 204.8 usec
-        for dpgAgentI in range(numDpgAgents):
+    for dpgAgentI in range(numDpgAgents):
+        if i % iterationsInPulse == dpgAgentStartIndices[dpgAgentI]:
             agentStates = lastPulseStates[dpgAgentI + numRandomStartAgents + numSaaAgents + numPpoAgents + numDqnAgents + numMfosAgents]
             if len(agentStates) == iterationsInPulse:
                 state_dpg = agentStates[-1].astype(np.float32)
@@ -623,26 +650,18 @@ for i in range(iterations): # 1 = 12.8 microseconds
                 obs_seq = np.stack(agentStates)
                 dpgAgent.select_action(obs_seq, eval_mode=eval)
                 dpgAgent.storeAction(intervalToCenterFreqBW(dpgAgent.currentAction))
-    if i % iterationsInPulse == 1: # Pulse lasts one iteration, then listens for PRI duration
-        for dpgAgent in dpgAgents:
-            dpgAgent.isTransmitting = False
+        elif i % iterationsInPulse == ((dpgAgentStartIndices[dpgAgentI]+1) % iterationsInPulse):
+            dpgAgents[dpgAgentI].isTransmitting = False
 
             
     # Static Agent Actions. Simulate frequency changes
     currentState = initState(fftSize)
     for staticAgent in staticAgents:
-        staticAgent.wobbleCurrentAction(rng=staticAgentRNG)
+        staticAgent.iterateCurrentAction(iteration=i)
     for j in range(numStaticAgents):
-        # Every 100_000 iterations, change the actionToToggle
-        if (j + 1) * 100_000 == i:
-            staticAgents[j].takeRandomAction(rng=staticAgentRNG)
-            staticAgents[j].actionToToggle = staticAgents[j].currentAction
-        # For 800 iterations, use actionToToggle
-        if i % 1000 == (j * 100) % 1000:
-            staticAgents[j].toggleAction()
-        # For 200 iterations, use new random action               
-        elif i % 1000 == (800 + j * 100) % 1000:
-            staticAgents[j].takeRandomAction(rng=staticAgentRNG)
+        # Every 50_000 iterations, choose a new action
+        if (j + 1) * 30_000 == i:
+            staticAgents[j].takeRandomAction()
     for staticAgent in staticAgents:
         currentState = updateStateInterval(currentState, staticAgent.currentAction)
     
