@@ -147,7 +147,6 @@ def computeRewardsForAgents(
 
         raw_start, raw_stop = currAction
         raw_bw_bins = raw_stop - raw_start
-        amountTx = raw_bw_bins * binSize  # MHz
 
         reward = 0.0
         if raw_bw_bins > 0:
@@ -165,9 +164,16 @@ def computeRewardsForAgents(
                 ownership_slice = binOwnership[exec_start:exec_stop]
 
                 total_bins = exec_stop - exec_start
-                owned_mask = (ownership_slice == agent_id)
-                owned_bins = np.sum(owned_mask)
-                collision_bins = total_bins - owned_bins
+                if multiAgent:
+                    owned_mask = (ownership_slice == agent_id)
+                    owned_bins = np.sum(owned_mask)
+
+                    collision_bins = total_bins - owned_bins
+                else:
+                    # Only static causes collision
+                    collision_mask = (ownership_slice == 1)
+
+                    collision_bins = np.sum(collision_mask)
                 # Add overflow as collision
                 collision_bins += overflow_bins
 
@@ -176,12 +182,10 @@ def computeRewardsForAgents(
 
                 cleanTxFrac = max(0.0, txFrac - collisionFrac)
 
-                
-
                 # Store Collision amount
                 cogAgent.collisions.append(collision_bins * binSize)
 
-                rewardSpectrum = transmissionWeight * cleanTxFrac - collisionWeight * collisionFraction
+                rewardSpectrum = transmissionWeight * cleanTxFrac - collisionWeight * collisionFrac
                 
                 avgCenterFreq = cogAgent.getAveCenterFreqForCPI()
                 avgBW = cogAgent.getAveBwForCPI()
@@ -190,29 +194,40 @@ def computeRewardsForAgents(
                 deltaCenterFreq = abs(agentCenterFreq - avgCenterFreq)
                 
                 rewardAdapt = (bandwidthDistortionFactor * deltaBW / channelBandwidth) + (centerDistortionFactor * deltaCenterFreq / channelBandwidth)
-                
-                
 
                 reward = rewardSpectrum - rewardAdapt
             else: # Listening but not transmitting
                 left_overflow = max(0, -raw_start)
                 right_overflow = max(0, raw_stop - fftSize)
-                overflowAmount = (left_overflow + right_overflow) * binSize
+                overflow_bins = left_overflow + right_overflow
                 
-                state = staticState.copy()
-                # Interfering agents
+                exec_start = max(0, raw_start)
+                exec_stop = min(fftSize, raw_stop)
+                
+                ownership_slice = binOwnership[exec_start:exec_stop]
+
+                total_bins = exec_stop - exec_start
                 if multiAgent:
-                    for cogAgent2 in cognitiveAgents:
-                        if cogAgent2 != cogAgent and cogAgent2.isTransmitting:
-                            state = updateStateInterval(state, cogAgent2.currentAction)
+                    owned_mask = (ownership_slice == agent_id)
+                    owned_bins = np.sum(owned_mask)
 
-                collisionAmount = computeCollisions(
-                    state, currAction
-                ) * binSize # MHz
+                    collision_bins = total_bins - owned_bins
+                else:
+                    # Only static causes collision
+                    collision_mask = (ownership_slice == 1)
 
-                collisionAmount += (overflowAmount)
-                collisionFraction = collisionAmount / (channelBandwidth)
-                reward -= (collisionFraction * (collisionWeight / 30))
+                    collision_bins = np.sum(collision_mask)
+                # Add overflow as collision
+                collision_bins += overflow_bins
+
+                # Store Collision amount
+                cogAgent.collisions.append(collision_bins * binSize)
+                
+                collisionFrac = (collision_bins * binSize) / channelBandwidth
+                
+                
+                
+                reward -= (collisionFrac * (collisionWeight / 30))
 
         cogAgent.allRewards.append(reward)
         
@@ -1032,7 +1047,7 @@ plt.tight_layout()
 
 # Average Collisions per agent over time plot
 plt.figure(figsize=(12, 8))
-block = cpiLen
+block = cpiLen * iterationsInPulse
 
 for randomStartAgent in range(numRandomStartAgents):
     x, mean, std = mean_std_every_n(randomStartAgents[randomStartAgent].collisions, block)
