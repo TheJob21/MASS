@@ -51,6 +51,49 @@ class RecurrentSpectrumPPO(nn.Module):
         # Critic head
         self.value = nn.Linear(lstm_hidden, 1)
 
+        self._init_weights()
+
+    def _init_weights(self):
+        # Embedding
+        nn.init.xavier_uniform_(self.embedding.weight)
+        nn.init.zeros_(self.embedding.bias)
+
+        # Positional embedding
+        nn.init.normal_(self.pos_embedding, mean=0.0, std=0.02)
+
+        # Attention
+        for name, p in self.snapshot_attn.named_parameters():
+            if "weight" in name:
+                nn.init.xavier_uniform_(p)
+            elif "bias" in name:
+                nn.init.zeros_(p)
+
+        # LSTM
+        for name, p in self.lstm.named_parameters():
+            if "weight_ih" in name:
+                nn.init.xavier_uniform_(p)
+            elif "weight_hh" in name:
+                nn.init.orthogonal_(p)
+            elif "bias" in name:
+                nn.init.zeros_(p)
+
+                if "bias_hh" in name:
+                    n = p.shape[0]
+                    with torch.no_grad():
+                        p[n//4:n//2] = 1.0
+
+        # Actor
+        nn.init.orthogonal_(self.mu.weight, gain=0.01)
+        nn.init.zeros_(self.mu.bias)
+        self.mu.bias.data = torch.tensor([-1.0, 1.0])
+
+        nn.init.orthogonal_(self.log_std.weight, gain=0.01)
+        nn.init.constant_(self.log_std.bias, -1.0)
+
+        # Critic
+        nn.init.orthogonal_(self.value.weight, gain=1.0)
+        nn.init.zeros_(self.value.bias)
+
     def encode_pulse(self, pulse_seq):
         """
         pulse_snapshots: (B*T, 20, 1024)

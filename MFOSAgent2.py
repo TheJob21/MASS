@@ -16,7 +16,8 @@ class RNN(nn.Module):
         genome,
         fftSize=1024,
         hidden_dim=128,
-        device="cpu"
+        device="cpu",
+        seed=None
     ):
         nn.Module.__init__(self)
 
@@ -25,7 +26,7 @@ class RNN(nn.Module):
         self.fftSize = fftSize
         self.hidden_dim = hidden_dim
         self.genome = genome
-        self.seed = int(self.genome["seed"])
+        self.seed = seed
         self.torch_rng = torch.Generator(device=device)
         if self.seed is not None:
             self.torch_rng.manual_seed(self.seed)
@@ -50,9 +51,19 @@ class RNN(nn.Module):
 
         # Reduce 1024 bins → 128 features
         # self.freq_pool = nn.MaxPool1d(kernel_size=8, stride=8)
+        
+        #----------------------------
+        # Alternative to CNN for speed improvement
+        # self.encoder = nn.Sequential(
+        #     nn.AvgPool1d(kernel_size=8, stride=8),  # 1024 → 128
+        # )
+        # self.proj = nn.Identity()
+        #----------------------------
+
         # --------------------------------------------------
         # CNN Encoder (frequency domain feature extractor)
         # --------------------------------------------------
+        
         self.encoder = nn.Sequential(
             nn.Conv1d(1, 16, kernel_size=7, stride=2, padding=3),
             nn.ReLU(),
@@ -62,15 +73,15 @@ class RNN(nn.Module):
             nn.ReLU()
         )
 
-        # Compute encoded size after convs
+        # # Compute encoded size after convs
         dummy = torch.zeros(1, 1, self.fftSize)
         with torch.no_grad():
             dummy_out = self.encoder(dummy)
         conv_out_size = dummy_out.view(1, -1).shape[1]
 
-        # --------------------------------------------------
-        # Projection layer (reduce dimensionality)
-        # --------------------------------------------------
+        # # --------------------------------------------------
+        # # Projection layer (reduce dimensionality)
+        # # --------------------------------------------------
         self.proj = nn.Linear(conv_out_size, 128)
 
         # --------------------------------------------------
@@ -78,12 +89,12 @@ class RNN(nn.Module):
         # --------------------------------------------------
         self.gru = nn.GRU(
             input_size=128,#pooled_bins,
-            hidden_size=256,  # increased from 128
-            num_layers=2,
+            hidden_size=256,  # alternate 256
+            num_layers=2, # alternate 2
             batch_first=True
         )
 
-        self.actor_hidden = nn.Linear(256 + 3, 128)
+        self.actor_hidden = nn.Linear(256 + 3, 128) # alternate 256+3
         self.actor = nn.Linear(128, 2)
 
         self.to(self.device)
@@ -131,7 +142,8 @@ class RNN(nn.Module):
         out, hidden = self.gru(x, hidden)      # (1,T,256)
 
         # pooled, _ = torch.max(out, dim=1)      # (1,256)
-        pooled = out[:, -1, :]
+        # pooled = out[:, -1, :]
+        pooled = torch.mean(out, dim=1)
 
         actorInput = torch.cat([pooled, prevActions, cpiIndices], dim=-1)
         
@@ -175,8 +187,12 @@ class RNN(nn.Module):
             dtype=torch.float32,
             device=self.device
         ).reshape(1, 1)  # (T=1, 1)
-
-        action, new_hidden = self.forward(state_tensor, prev_action_tensor, i_pulse_tensor, self.hidden)
+        
+        if eval:
+            with torch.no_grad():
+                action, new_hidden = self.forward(state_tensor, prev_action_tensor, i_pulse_tensor, self.hidden)
+        else:
+            action, new_hidden = self.forward(state_tensor, prev_action_tensor, i_pulse_tensor, self.hidden)
 
         if new_hidden is not None:
             self.hidden = new_hidden.detach()
@@ -206,7 +222,7 @@ class RNN(nn.Module):
             log_prob = dist.log_prob(sampled_action).sum()
             entropy = dist.entropy().sum()
             
-            self.entropy_history.append(entropy.item())
+            self.entropy_history.append(entropy)
             self.log_probs.append(log_prob)
 
         center_val = sampled_action[0].item()
@@ -274,7 +290,7 @@ class RNN(nn.Module):
 
         loss = loss / len(self.log_probs)
         
-        entropy_tensor = torch.tensor(self.entropy_history, device=self.device)
+        entropy_tensor = torch.stack(self.entropy_history)
 
         entropy_mean = entropy_tensor.mean()
         entropy_std = entropy_tensor.std()
@@ -299,7 +315,7 @@ class RNN(nn.Module):
         # -------------------------------
         # Gradient clipping
         # -------------------------------
-        # torch.nn.utils.clip_grad_norm_(self.parameters(), 5.0)
+        torch.nn.utils.clip_grad_norm_(self.parameters(), 5.0)
         
         # -------------------------------
         # Track parameter drift
@@ -401,13 +417,13 @@ class MFOSAgent(CognitiveAgent):
                 individual = MFOSIndividual(
                     self._random_genome()
                 )
-                self.policy = RNN(individual.genome, fftSize=fftSize, device=device)
+                self.policy = RNN(individual.genome, fftSize=fftSize, device=device, seed=seed)
                 self.population.append(individual)
         else:
             base_individual = MFOSIndividual(
                 base_genome
             )
-            self.policy = RNN(base_genome, fftSize=fftSize, device=device)
+            self.policy = RNN(base_genome, fftSize=fftSize, device=device, seed=seed)
             
             self.population.append(base_individual)
 
@@ -419,7 +435,7 @@ class MFOSAgent(CognitiveAgent):
                 )
                 self.population.append(individual)
 
-        self.best_fitness_ever = -np.inf
+        self.best_ave_reward_ever = -np.inf
         self.best_individual_ever = None
         self.eval_mode = False
 
@@ -450,6 +466,14 @@ class MFOSAgent(CognitiveAgent):
 
         individual = self.current_individual()
         rewards = np.array(individual.reward_history)
+        ave_reward = rewards.mean()
+        print("Average Reward for individual:",ave_reward)
+        # -------------------------------
+        # Track best individual EVER (by total reward)
+        # -------------------------------
+        if ave_reward > self.best_ave_reward_ever:
+            self.best_ave_reward_ever = ave_reward
+            self.best_individual_ever = copy.deepcopy(individual)
 
         # -------------------------------
         # Compute fitness (learning-based)
@@ -486,22 +510,34 @@ class MFOSAgent(CognitiveAgent):
         individual.reward_history = []
 
     def set_eval_mode(self):
-        # Find best individual across population
-        fitnesses = [ind.fitness for ind in self.population]
-        best_idx = int(np.argmax(fitnesses))
-        best_individual = self.population[best_idx]
+        # Start with best-ever
+        best_candidate = self.best_individual_ever
+        best_score = self.best_ave_reward_ever
 
-        # Update all-time best if needed
-        if fitnesses[best_idx] > self.best_fitness_ever:
-            self.best_fitness_ever = fitnesses[best_idx]
-            self.best_individual_ever = copy.deepcopy(best_individual)
+        # -------------------------------
+        # Check CURRENT individual (even if unfinished)
+        # -------------------------------
+        current = self.current_individual()
+        rewards = np.array(current.reward_history)
 
-        # Switch current individual to best-ever
-        self.current_index = best_idx
+        if len(rewards) > 0:
+            current_avg = rewards.mean()
+
+            if current_avg > best_score:
+                best_candidate = current
+                best_score = current_avg
+
+        if best_candidate is None:
+            raise ValueError("No valid individual found for evaluation.")
+
+        # -------------------------------
+        # Use best candidate
+        # -------------------------------
         self.eval_mode = True
-        print(self.best_individual_ever.genome)
-        # Reset hidden state of RNN for clean evaluation
+        self.policy.set_genome(best_candidate.genome)
         self.policy.reset()
+
+        print(f"Using best individual (avg reward = {best_score:.4f})")
 
     # --------------------------------------------------------
     # Check if generation finished
@@ -601,8 +637,6 @@ class MFOSAgent(CognitiveAgent):
             0.05
         )
 
-        genome["seed"] = self.np_rng.integers(0, 1000000)
-
     def genome_distance(self, g1, g2):
         g1 = g1.genome
         g2 = g2.genome
@@ -625,8 +659,5 @@ class MFOSAgent(CognitiveAgent):
 
         # Entropy
         g["entropy_coef"] = 10 ** self.np_rng.uniform(-4, -2)
-
-        # Seed
-        g["seed"] = self.np_rng.integers(0, 1_000_000)
 
         return g

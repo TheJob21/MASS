@@ -7,7 +7,7 @@ class FixedStartAgent(CognitiveAgent):
         if currentAction==None:
             self.takeRandomAction(rng=rng)
         
-    def takeRandomAction(self, rng=None, min_true=30, max_true=102):
+    def takeRandomAction(self, rng=None, min_true=102, max_true=306):
         if max_true > self.fftSize:
             raise ValueError("max_true cannot exceed fftSize")
         start = 0

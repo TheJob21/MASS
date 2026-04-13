@@ -77,8 +77,7 @@ class CognitiveAgent(Agent):
         bw_bins = max(bw_bins, 102) # min 10 MHz
 
         # --- Convert center to bin index (no clipping) ---
-        center_bin = (center + 1.0) * 0.5 * (fftSize - 1)
-        center_bin = int(round(center_bin))
+        center_bin = int(round((center + 1.0) * 0.5 * (fftSize - 1)))
 
         # --- Compute interval ---
         half_bw = bw_bins // 2

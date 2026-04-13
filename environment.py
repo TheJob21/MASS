@@ -4,7 +4,9 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import colorsys
 import torch
 import numpy as np
+import pandas as pd
 from StaticAgent import StaticAgent
+from StaticAgent import StaticType
 from SAAAgent import SAAAgent
 from PPOAgent import PPOAgent
 #from BetaPPOAgent import PPOAgent
@@ -29,18 +31,19 @@ policyClipFraction = 0.2 # epsilon
 numGradientEpochs = 10
 learningRate = 0.00025
 transmissionWeight = 1
-beta = 0.5
+beta = .75
 bandwidthDistortionFactor = beta # 0 - 1 Beta_bw
 centerDistortionFactor = beta # 0 - 1 Beta_f_c
 # ppo reward weights
 collisionTransmissionTolRatio = 0.0125 # for pulsed aversions
 collisionTransmissionTolRatio = 0.33 # for constant aversions Use worst reward for pulses, not effective in 2.4-2.5GHz live data
 collisionTransmissionTolRatio = 0.08 # effective in 2.4-2.5GHz live data,  Use worst reward for pulses
-# collisionTransmissionTolRatio = 0.04 # effective in 2.59-2.69GHz live data,  Use worst reward for pulses
+collisionTransmissionTolRatio = 0.04 # effective in 2.59-2.69GHz live data,  Use worst reward for pulses
 # collisionTransmissionTolRatio = 0.033 # Shane's recommendation 30 * collision
 # collisionTransmissionTolRatio = 0.0355
 # collisionWeight = 29
-collisionTransmissionTolRatio = .0275
+# collisionTransmissionTolRatio = .0275
+collisionTransmissionTolRatio = 0.033
 collisionWeight = (transmissionWeight / collisionTransmissionTolRatio) #* (1 - beta) # 0 - 50 alpha_c
 
 # Radar system parameters
@@ -118,7 +121,6 @@ def getLargestDeadSpaceInterval(prevState):
     return int(starts[idx]), int(ends[idx])
 
 def computeRewardsForAgents(
-    staticState,
     cognitiveAgents,
     binOwnership
 ):
@@ -142,7 +144,6 @@ def computeRewardsForAgents(
     for cogAgent in cognitiveAgents:
         currAction = cogAgent.currentAction
         if currAction is None:
-            # cogAgent.allRewards.append(0)
             continue
 
         raw_start, raw_stop = currAction
@@ -150,10 +151,10 @@ def computeRewardsForAgents(
 
         reward = 0.0
         if raw_bw_bins > 0:
+
+            agent_id = cognitiveAgents.index(cogAgent) + 2
+
             if cogAgent.isTransmitting:
-
-                agent_id = cognitiveAgents.index(cogAgent) + 2
-
                 left_overflow = max(0, -raw_start)
                 right_overflow = max(0, raw_stop - fftSize)
                 overflow_bins = left_overflow + right_overflow
@@ -219,9 +220,6 @@ def computeRewardsForAgents(
                     collision_bins = np.sum(collision_mask)
                 # Add overflow as collision
                 collision_bins += overflow_bins
-
-                # Store Collision amount
-                cogAgent.collisions.append(collision_bins * binSize)
                 
                 collisionFrac = (collision_bins * binSize) / channelBandwidth
                 
@@ -250,38 +248,72 @@ def sum_recent_rewards(rewardMap, end_t, window=256):
 def build_labeled_state(
     staticState,
     listOfAgents,
+    binOwnership,
     fftSize=1024
 ):
-    state = np.zeros(fftSize, dtype=np.int8)
-    alpha_mask = np.zeros(fftSize)
-    
-    state[staticState] = 1
+    # -------------------------------
+    # State is just ownership
+    # -------------------------------
+    state = binOwnership.copy()
+
+    # -------------------------------
+    # Alpha mask (visibility)
+    # -------------------------------
+    alpha_mask = np.zeros(fftSize, dtype=float)
+
+    # Static always visible
     alpha_mask[staticState] = 1.0
-    
-    # Track occupancy count for collision detection
-    occupied_counts = state.copy()
-    
-    label = 2
-    for agent in listOfAgents:
-        if agent.currentAction is not None:
-            s, e = agent.currentAction
-            s = max(s, 0)
-            if agent.isTransmitting:
-                occupied_counts[s:e] += 1
-            
-            transmit_mask = agent.isTransmitting | (alpha_mask[s:e] < 1.0)
-            
-            state[s:e][transmit_mask] = label
-            alpha_mask[s:e][transmit_mask] = 1.0 if agent.isTransmitting else 0.3
 
-        label += 1
+    # -------------------------------
+    # Collision mask
+    # -------------------------------
+    collision_mask = np.zeros(fftSize, dtype=bool)
 
+    # -------------------------------
+    # Process agents
+    # -------------------------------
+    for idx, agent in enumerate(listOfAgents):
+
+        if agent.currentAction is None:
+            continue
+
+        s, e = agent.currentAction
+        s = max(0, s)
+        e = min(fftSize, e)
+
+        if s >= e:
+            continue
+
+        agent_id = idx + 2
+
+        if agent.isTransmitting:
+            ownership_slice = binOwnership[s:e]
+
+            # collision = transmitting where not owner
+            if multiAgent:
+                local_collision = (ownership_slice != agent_id)
+            else:
+                local_collision = (ownership_slice == 1)
+
+            collision_mask[s:e] |= local_collision
+
+            # transmitting always visible
+            alpha_mask[s:e] = 1.0
+
+        else:
+            # listening: semi-transparent, but don't override TX
+            listen_mask = (alpha_mask[s:e] < 1.0)
+            alpha_mask[s:e][listen_mask] = 0.3
+
+    # -------------------------------
     # Collision override
-    state[occupied_counts > 1] = label
-    alpha_mask[occupied_counts > 1] = 1.0
-    
-    return state, alpha_mask
+    # -------------------------------
+    collision_label = len(listOfAgents) + 2
 
+    state[collision_mask] = collision_label
+    alpha_mask[collision_mask] = 1.0
+
+    return state, alpha_mask
 
 def build_agent_colormap(n_colors):
     """
@@ -356,6 +388,7 @@ def updateBinOwnership(binOwnership, staticState, cognitiveAgents):
     # -------------------------------
     claim_counts = np.zeros(fftSize, dtype=np.int32)
     claimants = [[] for _ in range(fftSize)]
+    transmitters = [[] for _ in range(fftSize)]  # NEW
 
     for idx, agent in enumerate(cognitiveAgents):
         if agent.currentAction is None:
@@ -368,11 +401,14 @@ def updateBinOwnership(binOwnership, staticState, cognitiveAgents):
         if start >= stop:
             continue
 
-        agent_id = idx + 2  # reserve 0,1
+        agent_id = idx + 2
 
         for i in range(start, stop):
             claim_counts[i] += 1
             claimants[i].append(agent_id)
+
+            if agent.isTransmitting:
+                transmitters[i].append(agent_id)  # NEW
 
     # -------------------------------
     # Step 3: resolve ownership
@@ -384,23 +420,37 @@ def updateBinOwnership(binOwnership, staticState, cognitiveAgents):
             continue
 
         if claim_counts[i] == 1:
-            # Only one agent → gets ownership
             binOwnership[i] = claimants[i][0]
 
         elif claim_counts[i] > 1:
-            # Multiple agents → check previous ownership
             prev_owner = prevOwnership[i]
 
+            # ----------------------------------
+            # Case 1: previous owner keeps it
+            # ----------------------------------
             if prev_owner >= 2 and prev_owner in claimants[i]:
-                # Previous owner retains control
                 binOwnership[i] = prev_owner
+
+            # ----------------------------------
+            # Case 2: no previous owner → NEW RULE
+            # ----------------------------------
+            elif prev_owner == 0:
+                tx_list = transmitters[i]
+
+                if len(tx_list) == 1:
+                    # exactly one transmitter → wins
+                    binOwnership[i] = tx_list[0]
+                else:
+                    # 0 or multiple transmitters → no owner
+                    binOwnership[i] = 0
+
+            # ----------------------------------
+            # Case 3: previous owner lost claim
+            # ----------------------------------
             else:
-                # True simultaneous collision → no owner
                 binOwnership[i] = 0
 
-        else:
-            # No one claims → stays 0 (released)
-            pass
+    # else: remains 0
 
 def HOCAE(frame, window_size, k, Pfa):
     '''
@@ -503,7 +553,7 @@ spectrumSampleSize=30_000
 allStates = []
 deadspace = [] # MHz
 device = "cpu"
-seed = 42069
+seed = 422069
 staticAgentRNG = np.random.default_rng(seed)
 seed += 1
 randomStartAgentRNG = np.random.default_rng(seed)
@@ -517,7 +567,23 @@ seed += 1
 torch.Generator(device=device).manual_seed(seed)
 
 
-    
+transmissionWeight = 1
+beta = .5
+bandwidthDistortionFactor = beta # 0 - 1 Beta_bw
+centerDistortionFactor = beta # 0 - 1 Beta_f_c
+# ppo reward weights
+collisionTransmissionTolRatio = 0.0125 # for pulsed aversions
+collisionTransmissionTolRatio = 0.33 # for constant aversions Use worst reward for pulses, not effective in 2.4-2.5GHz live data
+collisionTransmissionTolRatio = 0.08 # effective in 2.4-2.5GHz live data,  Use worst reward for pulses
+collisionTransmissionTolRatio = 0.04 # effective in 2.59-2.69GHz live data,  Use worst reward for pulses
+# collisionTransmissionTolRatio = 0.033 # Shane's recommendation 30 * collision
+# collisionTransmissionTolRatio = 0.0355
+# collisionWeight = 29
+# collisionTransmissionTolRatio = .0275
+collisionTransmissionTolRatio = 0.033
+collisionWeight = (transmissionWeight / collisionTransmissionTolRatio) #* (1 - beta) # 0 - 50 alpha_c
+
+output_file = "agent_eval_summary.xlsx"
 liveDataFilename = '../spectrum_245ghz.dat' # 2.4-2.5 GHz
 liveDataFilename = '../spectrum_264ghz.dat' # 2.59-2.69 GHz
 storedStateFile = '../spectrum_245ghz.npz' if liveDataFilename == '../spectrum_245ghz.dat' else '../spectrum_264ghz.npz' # 2.4-2.5 GHz
@@ -547,7 +613,7 @@ if not sim:
         np.savez_compressed(storedStateFile, states=liveData)
         print("Saved precomputed states:", liveData.shape)
 
-iterations = 100_000 if sim else liveData.shape[0]
+iterations = 1_000_000 if sim else liveData.shape[0]
 multiAgent = True
 # iterations *= 3
 eval = False
@@ -558,19 +624,19 @@ allCogAgents = []
 
 # Static Agents For Simulating Environment
 staticAgents = []
-numLargeAgents = 2 # pw .1 - .25K, interval 10K, 150-175 bins wide
-numSkinnyAgents = 3 # pw .25K, interval 2K, 20 bins wide
+numLargeAgents = 3 # pw .1 - .25K, interval 10K, 150-175 bins wide
+numSkinnyAgents = 4 # pw .25K, interval 2K, 20 bins wide
 numPulsedAgents = 5 # pw .1K, interval = 4K, 30-40 bins wide on/off
-numRectangleAgents = 2 # pw = 50, interval = 10 -250,  60-680 bins
+numRectangleAgents = 0 # pw = 50, interval = 10 -250,  60-680 bins
 numStaticAgents = numLargeAgents + numSkinnyAgents + numPulsedAgents + numRectangleAgents
 for staticAgent in range(numLargeAgents):
-    staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=0))
+    staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Fat))
 for staticAgent in range(numSkinnyAgents):
-    staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=1))
+    staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Skinny))
 for staticAgent in range(numPulsedAgents):
-    staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=2))
+    staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Pulsed))
 for staticAgent in range(numRectangleAgents):
-    staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=3))
+    staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Rectangular))
 
 # Random Single Action Agent
 numRandomStartAgents = 0
@@ -579,9 +645,8 @@ randomStartAgentStartIndices = []
 for randAgent in range(numRandomStartAgents):
     randomStartAgents.append(FixedStartAgent(rng=randomStartAgentRNG))
     randomStartAgents[randAgent].storeAction(intervalToCenterFreqBW(randomStartAgents[randAgent].currentAction))
-    randomStartAgentStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+    randomStartAgentStartIndices.append(0)#torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
     allCogAgents.append(randomStartAgents[randAgent])
-
     
 # SAA Agent Parameters
 numSaaAgents = 0 # Sense-And-Avoid
@@ -598,11 +663,11 @@ ppoAgents = []
 ppoAgentStartIndices = []
 for ppoAgent in range(numPpoAgents):
     ppoAgents.append(PPOAgent(fftSize=fftSize, cpiLen=cpiLen, device=device, seed=ppoSeed+ppoAgent))
-    ppoAgentStartIndices.append(0)#torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+    ppoAgentStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
     allCogAgents.append(ppoAgents[ppoAgent])
 
 # DQN Agent Parameters
-BANDWIDTHS = [32, 64, 96]
+BANDWIDTHS = [96, 128, 160] #[32, 64, 96]
 CENTERS = np.linspace(0, fftSize-1, 32, dtype=int)
 DQN_ACTIONS = []
 for bw in BANDWIDTHS:
@@ -620,33 +685,31 @@ for dqnAgent in range(numDqnAgents):
     allCogAgents.append(dqnAgents[dqnAgent])
 
 # M-FOS Agent Initialization
-numMfosAgents = 0
+numMfosAgents = 3
 mfosAgents = []
 mfosAgentStartIndices = []
 for mfosAgentI in range(numMfosAgents):
-    base_genome = {
-        "seed": mfosSeed+mfosAgentI,
-        "weight_scale": 1.26,
-        "lr": 5e-4,
-        "gamma": 0.885,
-        "exploration_center": 0.073,
-        "exploration_bw": 0.106,
-        "entropy_coef": .0008
-    }
-    # base_genome = None
+    # base_genome = {
+    #     "lr": 1.4e-5,
+    #     "gamma": 0.989,
+    #     "exploration_center": 0.151,
+    #     "exploration_bw": 0.14,
+    #     "entropy_coef": .00013
+    # }
+    base_genome = None # Random Genomes
     mfosAgent = MFOSAgent(
         population_size=5,
-        base_genome=None,#base_genome,
+        base_genome=base_genome,
         mutation_scale=0.05,
         elite_fraction=.4,
         fresh_fraction=0.2,
-        seed=seed + mfosAgentI + 1,
+        seed=seed + mfosAgentI + 1, #42075 is good for random genomes and weights?
         device=device,
         fftSize=fftSize,
         cpiLen=cpiLen
     )
     mfosAgents.append(mfosAgent)
-    mfosAgentStartIndices.append(0)#torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+    mfosAgentStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
     allCogAgents.append(mfosAgent)
 
 # DPG Agent Initialization
@@ -765,7 +828,7 @@ for i in range(iterations): # 1 = 12.8 microseconds
         staticAgent.iterateCurrentAction(iteration=i)
     for j in range(numStaticAgents):
         # Every 50_000 iterations, choose a new action
-        if (j + 1) * 30_000 == i:
+        if ((staticAgents[j].staticType == StaticType.Fat or StaticType.Pulsed) and (j + 1) * 100_000 == i) or (staticAgents[j].staticType == StaticType.Skinny and (j + 1) * 30_000 == i):
             staticAgents[j].takeRandomAction()
     for staticAgent in staticAgents:
         currentState = updateStateInterval(currentState, staticAgent.currentAction)
@@ -782,11 +845,17 @@ for i in range(iterations): # 1 = 12.8 microseconds
                 currentState = updateStateInterval(currentState, agent.currentAction)
     occupiedBwPerIteration.append(np.sum(currentState) * binSize)
     
+    updateBinOwnership(
+        binOwnership=binOwnership, 
+        staticState=staticState, 
+        cognitiveAgents=allCogAgents
+    )
     # Only build labeled state for final sample size
     if i >= iterations-spectrumSampleSize: 
         allStates.append(build_labeled_state(
             staticState=staticState,
             listOfAgents=allCogAgents,
+            binOwnership=binOwnership,
             fftSize=fftSize
         ))
     deadSpaceInterval = getLargestDeadSpaceInterval(currentState)
@@ -795,57 +864,56 @@ for i in range(iterations): # 1 = 12.8 microseconds
     else: 
         deadspace.append((deadSpaceInterval[1] - deadSpaceInterval[0]) * binSize)
     
-    binOwnership = updateBinOwnership(
-        binOwnership=binOwnership, 
-        staticState=staticState, 
-        cognitiveAgents=allCogAgents
-    )
 
     # Compute reward for cognitive agents
     computeRewardsForAgents(
-        staticState=staticState,
         cognitiveAgents=allCogAgents,
         binOwnership=binOwnership
     )
     
-    if not eval and i  % iterationsInPulse == iterationsInPulse-1 and len(lastPulseStates) > 0 and len(lastPulseStates[0]) == iterationsInPulse: # every 204.8 usec
+    if not eval and i > 0 and len(lastPulseStates) > 0 and len(lastPulseStates[0]) == iterationsInPulse: # every 204.8 usec
         # Update PPO Agents
         for ppoAgent in ppoAgents:
-            if ppoAgent.currentAction is not None:
-                reward = sum_recent_rewards(ppoAgent.allRewards, i, iterationsInPulse)
+            rewardCount = len(ppoAgent.allRewards)
+            if rewardCount > 0 and rewardCount % iterationsInPulse == 0:
                 ppoAgent.store_reward(
-                    reward,
+                    reward=sum(ppoAgent.allRewards[-iterationsInPulse:]),
                     done=False
                 )
                 ppoAgent.update()
         # Update DQN Agents
         for dqnAgent in dqnAgents:
-            dqnAgent.buffer.push(
-                state_t,
-                action_idx,
-                sum_recent_rewards(dqnAgent.allRewards, i, window=iterationsInPulse),
-                currentState.astype(np.float32),
-                False
-            )
-            dqnAgent.train_step(rng=dqnAgentRNG)
+            rewardCount = len(dqnAgent.allRewards)
+            if rewardCount > 0 and rewardCount % iterationsInPulse == 0:
+                dqnAgent.buffer.push(
+                    state_t,
+                    action_idx,
+                    sum(dqnAgent.allRewards[-iterationsInPulse:]),
+                    currentState.astype(np.float32),
+                    False
+                )
+                dqnAgent.train_step(rng=dqnAgentRNG)
         # Update M-FOS Agents  
         for mfosAgent in mfosAgents:
-            reward = sum_recent_rewards(mfosAgent.allRewards, i, window=iterationsInPulse)
-            mfosAgent.record_reward(reward)
-            mfosAgent.update()
+            rewardCount = len(mfosAgent.allRewards)
+            if rewardCount > 0 and rewardCount % iterationsInPulse == 0:
+                mfosAgent.record_reward(reward=sum(mfosAgent.allRewards[-iterationsInPulse:]))
+                mfosAgent.update()
 
         # Update DPG Agents:
         for dpgAgent in dpgAgents:
-            reward = sum_recent_rewards(dpgAgent.allRewards, i, window=iterationsInPulse)
-            dpgAgent.buffer.push(
-                state_dpg,
-                dpgAgent.lastAction,
-                reward,
-                currentState.astype(np.float32),
-                False
-            )
+            rewardCount = len(dpgAgent.allRewards)
+            if rewardCount > 0 and rewardCount % iterationsInPulse == 0:
+                reward = sum_recent_rewards(dpgAgent.allRewards, rewardCount, window=iterationsInPulse)
+                dpgAgent.buffer.push(
+                    state_dpg,
+                    dpgAgent.lastAction,
+                    sum(dpgAgent.allRewards[-iterationsInPulse:]),
+                    currentState.astype(np.float32),
+                    False
+                )
 
-            dpgAgent.train_step()
+                dpgAgent.train_step()
             
     if not eval:
         if i % (iterationsInPulse * 1000) == 0:
@@ -910,7 +978,10 @@ im = plt.imshow(
     alpha=alphaMatrix
 )
 im.format_cursor_data = lambda _: ""
-plt.xlabel("Frequency Bin (" + ("2.4-2.5" if liveDataFilename == '../spectrum_245ghz.dat' else "2.59-2.69") + "GHz)")
+if sim:
+    plt.xlabel("Frequency Bin (Simulated 2.4-2.5 GHz)")
+else:
+    plt.xlabel("Frequency Bin (" + ("2.4-2.5" if liveDataFilename == '../spectrum_245ghz.dat' else "2.59-2.69") + "GHz)")
 plt.ylabel(f"Time Step (1 time step = {timestep} usec)")
 plt.title(f"Spectrum Occupancy Over Time (Last {spectrumSampleSize} time steps)")
 cbar = plt.colorbar(ticks=ticks)
@@ -936,105 +1007,79 @@ cbar.ax.set_yticklabels(tickLabels)
 plt.tight_layout()
 
 # Plot total spectrum occupancy over time
-x, mean, std = mean_std_every_n(occupiedBwPerIteration, n=4096)
-plt.figure(figsize=(12, 6))
-plt.plot(x, mean, label=f"Average Total Spectrum Occupancy")
-plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-plt.xlabel("Time step")
-plt.ylabel("Occupied Bandwidth (MHz)")
-plt.title("Total Occupied Bandwidth Over Time")
-plt.grid(True)
+# x, mean, std = mean_std_every_n(occupiedBwPerIteration, n=4096)
+# plt.figure(figsize=(12, 6))
+# plt.plot(x, mean, label=f"Average Total Spectrum Occupancy")
+# plt.fill_between(x, mean - std, mean + std, alpha=0.25)
+# plt.xlabel("Time step")
+# plt.ylabel("Occupied Bandwidth (MHz)")
+# plt.title("Total Occupied Bandwidth Over Time")
+# plt.grid(True)
+
+# Initialize summary containers
+reward_summary, bw_summary, coll_summary, delta_bw_summary, delta_cf_summary = [], [], [], [], []
 
 # Agent Reward Mean over time plot
 plt.figure(figsize=(12, 8))
 block = cpiLen * iterationsInPulse
 
-for randomStartAgent in range(numRandomStartAgents):
-    x, mean, std = mean_std_every_n(randomStartAgents[randomStartAgent].allRewards, block)
-    plt.plot(x, mean, label=f"Random Start Agent {randomStartAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-for saaAgent in range(numSaaAgents):
-    x, mean, std = mean_std_every_n(saaAgents[saaAgent].allRewards, block)
-    plt.plot(x, mean, label=f"SAA Agent {saaAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-for ppoAgent in range(numPpoAgents):
-    x, mean, std = mean_std_every_n(ppoAgents[ppoAgent].allRewards, block)
-    plt.plot(x, mean, label=f"PPO Agent {ppoAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-for dqnAgent in range(numDqnAgents):
-    x, mean, std = mean_std_every_n(dqnAgents[dqnAgent].allRewards, block)
-    plt.plot(x, mean, label=f"DQN Agent {dqnAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-for mfosAgent in range(numMfosAgents):
-    x, mean, std = mean_std_every_n(mfosAgents[mfosAgent].allRewards, block)
-    plt.plot(x, mean, label=f"M-FOS Agent {mfosAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-for dpgAgent in range(numDpgAgents):
-    x, mean, std = mean_std_every_n(dpgAgents[dpgAgent].allRewards, block)
-    plt.plot(x, mean, label=f"DPG Agent {dpgAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-        
+for agent_type, agents, label_prefix in [
+    ("RandomStart", randomStartAgents, "Random Start Agent"),
+    ("SAA", saaAgents, "SAA Agent"),
+    ("PPO", ppoAgents, "PPO Agent"),
+    ("DQN", dqnAgents, "DQN Agent"),
+    ("MFOS", mfosAgents, "M-FOS Agent"),
+    ("DPG", dpgAgents, "DPG Agent")
+]:
+    for idx, agent in enumerate(agents):
+        allRewards = np.array(agent.allRewards)
+        x, mean, std = mean_std_every_n(allRewards, block)
+        plt.plot(x, mean, label=f"{label_prefix} {idx+1}")
+        plt.fill_between(x, mean - std, mean + std, alpha=0.25)
+        # Collect last 20% stats
+        last_idx = int(len(allRewards) * 0.8)
+        reward_summary.append({
+            "agent_type": agent_type,
+            "agent_idx": idx,
+            "avg_reward": float(np.mean(allRewards[last_idx:])),
+            "std_reward": float(np.std(allRewards[last_idx:])),
+        })
+
 plt.xlabel("Time Step (1=52,428.8 usec = 1 CPI)")
 plt.ylabel("Mean Reward")
 plt.title("Mean Reward Over Time")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
-
-
-# Temp Plot
-# plt.figure(figsize=(12, 8))
-# block = 4096
-
-# for ppoAgent in range(numPpoAgents):
-#     x, mean, std = mean_std_every_n(ppoAgents[ppoAgent].txFracs, block)
-#     plt.plot(x, mean, label="PPO Agent Tx Fracs")
-#     plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-    
-#     x, mean, std = mean_std_every_n(ppoAgents[ppoAgent].collFracs, block)
-#     plt.plot(x, mean, label="PPO Agent Coll Fracs")
-#     plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-    
-#     x, mean, std = mean_std_every_n(ppoAgents[ppoAgent].centerErrorFracs, block)
-#     plt.plot(x, mean, label="PPO Agent Center Error Fracs")
-#     plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-    
-# plt.xlabel("Time Step (1 = 52,428.8 usec)")
-# plt.ylabel("Fraction Amount (MHz)")
-# plt.title("PPO Reward Stats")
-# plt.legend()
-# plt.grid(True)
-# plt.tight_layout()
+plt.margins(x=0, y=0)
 
 # Average BW usage per agent over time plot
 plt.figure(figsize=(12, 8))
 block = cpiLen
 
-for saaAgent in range(numSaaAgents):
-    allActionsArr = np.array(saaAgents[saaAgent].allActions)
-    x, mean, std = mean_std_every_n(allActionsArr[:, 1], block)
-    plt.plot(x, mean, label=f"SAA Agent {saaAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-for ppoAgent in range(numPpoAgents):
-    allActionsArr = np.array(ppoAgents[ppoAgent].allActions)
-    x, mean, std = mean_std_every_n(allActionsArr[:, 1], block)
-    plt.plot(x, mean, label=f"PPO Agent {ppoAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-for dqnAgent in range(numDqnAgents):
-    allActionsArr = np.array(dqnAgents[dqnAgent].allActions)
-    x, mean, std = mean_std_every_n(allActionsArr[:, 1], block)
-    plt.plot(x, mean, label=f"DQN Agent {dqnAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-for mfosAgent in range(numMfosAgents):
-    allActionsArr = np.array(mfosAgents[mfosAgent].allActions)
-    x, mean, std = mean_std_every_n(allActionsArr[:, 1], block)
-    plt.plot(x, mean, label=f"M-FOS Agent {mfosAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-for dpgAgent in range(numDpgAgents):
-    allActionsArr = np.array(dpgAgents[dpgAgent].allActions)
-    x, mean, std = mean_std_every_n(allActionsArr[:, 1], block)
-    plt.plot(x, mean, label=f"DPG Agent {dpgAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
+for agent_type, agents, label_prefix in [
+    ("SAA", saaAgents, "SAA Agent"),
+    ("PPO", ppoAgents, "PPO Agent"),
+    ("DQN", dqnAgents, "DQN Agent"),
+    ("MFOS", mfosAgents, "M-FOS Agent"),
+    ("DPG", dpgAgents, "DPG Agent")
+]:
+    for idx, agent in enumerate(agents):
+        allActionsArr = np.array(agent.allActions)
+        x, mean, std = mean_std_every_n(allActionsArr[:, 1], block)
+        plt.plot(x, mean, label=f"{label_prefix} {idx+1}")
+        plt.fill_between(x, mean - std, mean + std, alpha=0.25)
+        # Last 20% bandwidth
+        bandwidth = allActionsArr[:, 1]
+        start = int(len(bandwidth) * 0.8)
+        last_slice = bandwidth[start:]
+
+        bw_summary.append({
+            "agent_type": agent_type,
+            "agent_idx": idx,
+            "avg_bw": float(np.mean(last_slice)),
+            "std_bw": float(np.std(last_slice)),
+        })
     
 plt.xlabel("Time Step (1 = 52,428.8 usec)")
 plt.ylabel("Mean Bandwidth (MHz)")
@@ -1042,170 +1087,181 @@ plt.title("Mean Bandwidth Over Time")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
-
+plt.margins(x=0, y=0)
 
 
 # Average Collisions per agent over time plot
 plt.figure(figsize=(12, 8))
-block = cpiLen * iterationsInPulse
+block = cpiLen
 
-for randomStartAgent in range(numRandomStartAgents):
-    x, mean, std = mean_std_every_n(randomStartAgents[randomStartAgent].collisions, block)
-    plt.plot(x, mean, label=f"Random Start Agent {randomStartAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-for saaAgent in range(numSaaAgents):
-    x, mean, std = mean_std_every_n(saaAgents[saaAgent].collisions, block)
-    plt.plot(x, mean, label=f"SAA Agent {saaAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-for ppoAgent in range(numPpoAgents):
-    x, mean, std = mean_std_every_n(ppoAgents[ppoAgent].collisions, block)
-    plt.plot(x, mean, label=f"PPO Agent {ppoAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-for dqnAgent in range(numDqnAgents):
-    x, mean, std = mean_std_every_n(dqnAgents[dqnAgent].collisions, block)
-    plt.plot(x, mean, label=f"DQN Agent {dqnAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-for mfosAgent in range(numMfosAgents):
-    x, mean, std = mean_std_every_n(mfosAgents[mfosAgent].collisions, block)
-    plt.plot(x, mean, label=f"M-FOS Agent {mfosAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-for dpgsAgent in range(numDpgAgents):
-    x, mean, std = mean_std_every_n(dpgAgents[dpgAgent].collisions, block)
-    plt.plot(x, mean, label=f"DPG Agent {dpgAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-    
+for agent_type, agents, label_prefix in [
+    ("RandomStart", randomStartAgents, "Random Start Agent"),
+    ("SAA", saaAgents, "SAA Agent"),
+    ("PPO", ppoAgents, "PPO Agent"),
+    ("DQN", dqnAgents, "DQN Agent"),
+    ("MFOS", mfosAgents, "M-FOS Agent"),
+    ("DPG", dpgAgents, "DPG Agent")
+]:
+    for idx, agent in enumerate(agents):
+        allCollisionsArr = np.array(agent.collisions)
+        x, mean, std = mean_std_every_n(allCollisionsArr, block)
+        plt.plot(x, mean, label=f"{label_prefix} {idx+1}")
+        plt.fill_between(x, mean - std, mean + std, alpha=0.25)
+        last_idx = int(len(allCollisionsArr) * 0.8)
+        coll_summary.append({
+            "agent_type": agent_type,
+            "agent_idx": idx,
+            "avg_coll": float(np.mean(allCollisionsArr[last_idx:])),
+            "std_coll": float(np.std(allCollisionsArr[last_idx:])),
+        })
+
 plt.xlabel("Time Step (1 = 52,428.8 usec = 1 CPI)")
 plt.ylabel("Mean Collision Bandwidth (MHz)")
 plt.title("Mean Collision Bandwidth Over Time")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
+plt.margins(x=0, y=0)
 
 # Mean Missed Opportunity Bandwidth per Duty Cycle
-plt.figure(figsize=(12, 8))
-block = cpiLen * iterationsInPulse
+# plt.figure(figsize=(12, 8))
+# block = cpiLen * iterationsInPulse
 
-x, mean, std = mean_std_every_n(deadspace, block)
-plt.plot(x, mean, label="Mean Deadspace")
-plt.fill_between(x, mean - std, mean + std, alpha=0.25)
+# x, mean, std = mean_std_every_n(deadspace, block)
+# plt.plot(x, mean, label="Mean Deadspace")
+# plt.fill_between(x, mean - std, mean + std, alpha=0.25)
     
-plt.xlabel("Time Step (1 = 52,428.8 usec)")
-plt.ylabel("Mean Unused Bandwidth (MHz)")
-plt.title("Mean Unused Bandwidth Over Time")
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
+# plt.xlabel("Time Step (1 = 52,428.8 usec)")
+# plt.ylabel("Mean Unused Bandwidth (MHz)")
+# plt.title("Mean Unused Bandwidth Over Time")
+# plt.legend()
+# plt.grid(True)
+# plt.tight_layout()
+# plt.margins(x=0, y=0)
 
 # Delta BW Per Agent Plot
 plt.figure(figsize=(12, 8))
 block = cpiLen
 
-for saaAgent in range(numSaaAgents):
-    allActionsArr = np.array(saaAgents[saaAgent].allActions)
-    bandwidth = allActionsArr[:, 1]
-    diffs = np.abs(np.diff(bandwidth))
+for agent_type, agents, label_prefix in [
+    ("SAA", saaAgents, "SAA Agent"),
+    ("PPO", ppoAgents, "PPO Agent"),
+    ("DQN", dqnAgents, "DQN Agent"),
+    ("MFOS", mfosAgents, "M-FOS Agent"),
+    ("DPG", dpgAgents, "DPG Agent")
+]:
+    for idx, agent in enumerate(agents):
+        allActionsArr = np.array(agent.allActions)
+        diffs = np.abs(np.diff(allActionsArr[:, 1]))  # bandwidth diffs
+        x, mean, std = mean_std_every_n(diffs, block)
+        plt.plot(x, mean, label=f"{label_prefix} {idx+1}")
+        plt.fill_between(x, mean - std, mean + std, alpha=0.25)
+        last_idx = int(len(mean) * 0.8)
+        delta_bw_summary.append({
+            "agent_type": agent_type,
+            "agent_idx": idx,
+            "avg_delta_bw": float(np.mean(mean[last_idx:])),
+            "std_delta_bw": float(np.mean(std[last_idx:])),
+        })
 
-    x, mean, std = mean_std_every_n(diffs, block)
-    plt.plot(x, mean, label=f"SAA Agent {saaAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-
-for ppoAgent in range(numPpoAgents):
-    allActionsArr = np.array(ppoAgents[ppoAgent].allActions)
-    bandwidth = allActionsArr[:, 1]
-    diffs = np.abs(np.diff(bandwidth))
-
-    x, mean, std = mean_std_every_n(diffs, block)
-    plt.plot(x, mean, label=f"PPO Agent {ppoAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-
-for dqnAgent in range(numDqnAgents):
-    allActionsArr = np.array(dqnAgents[dqnAgent].allActions)
-    bandwidth = allActionsArr[:, 1]
-    diffs = np.abs(np.diff(bandwidth))
-
-    x, mean, std = mean_std_every_n(diffs, block)
-    plt.plot(x, mean, label=f"DQN Agent {dqnAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-
-for mfosAgent in range(numMfosAgents):
-    allActionsArr = np.array(mfosAgents[mfosAgent].allActions)
-    bandwidth = allActionsArr[:, 1]
-    diffs = np.abs(np.diff(bandwidth))
-
-    x, mean, std = mean_std_every_n(diffs, block)
-    plt.plot(x, mean, label=f"M-FOS Agent {mfosAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-
-for dpgAgent in range(numDpgAgents):
-    allActionsArr = np.array(dpgAgents[dpgAgent].allActions)
-    bandwidth = allActionsArr[:, 1]
-    diffs = np.abs(np.diff(bandwidth))
-
-    x, mean, std = mean_std_every_n(diffs, block)
-    plt.plot(x, mean, label=f"DPG Agent {dpgAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-    
 plt.xlabel("Time Step (1 = 52,428.8 usec = 1 CPI)")
 plt.ylabel("Mean |Δ Bandwidth| (MHz)")
 plt.title("Average Bandwidth Change Over Time")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
+plt.margins(x=0, y=0)
 
 # Delta Center Frequency Per Agent Plot
 plt.figure(figsize=(12, 8))
 block = cpiLen
 
-for saaAgent in range(numSaaAgents):
-    allActionsArr = np.array(saaAgents[saaAgent].allActions)
-    centerFreq = allActionsArr[:, 0]
-    diffs = np.abs(np.diff(centerFreq))
+for agent_type, agents, label_prefix in [
+    ("SAA", saaAgents, "SAA Agent"),
+    ("PPO", ppoAgents, "PPO Agent"),
+    ("DQN", dqnAgents, "DQN Agent"),
+    ("MFOS", mfosAgents, "M-FOS Agent"),
+    ("DPG", dpgAgents, "DPG Agent")
+]:
+    for idx, agent in enumerate(agents):
+        allActionsArr = np.array(agent.allActions)
+        diffs = np.abs(np.diff(allActionsArr[:, 0]))  # center freq diffs
+        x, mean, std = mean_std_every_n(diffs, block)
+        plt.plot(x, mean, label=f"{label_prefix} {idx+1}")
+        plt.fill_between(x, mean - std, mean + std, alpha=0.25)
+        last_idx = int(len(mean) * 0.8)
+        delta_cf_summary.append({
+            "agent_type": agent_type,
+            "agent_idx": idx,
+            "avg_delta_cf": float(np.mean(mean[last_idx:])),
+            "std_delta_cf": float(np.mean(std[last_idx:])),
+        })
 
-    x, mean, std = mean_std_every_n(diffs, block)
-    plt.plot(x, mean, label=f"SAA Agent {saaAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-
-for ppoAgent in range(numPpoAgents):
-    allActionsArr = np.array(ppoAgents[ppoAgent].allActions)
-    centerFreq = allActionsArr[:, 0]
-    diffs = np.abs(np.diff(centerFreq))
-
-    x, mean, std = mean_std_every_n(diffs, block)
-    plt.plot(x, mean, label=f"PPO Agent {ppoAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-
-for dqnAgent in range(numDqnAgents):
-    allActionsArr = np.array(dqnAgents[dqnAgent].allActions)
-    centerFreq = allActionsArr[:, 0]
-    diffs = np.abs(np.diff(centerFreq))
-
-    x, mean, std = mean_std_every_n(diffs, block)
-    plt.plot(x, mean, label=f"DQN Agent {dqnAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-
-for mfosAgent in range(numMfosAgents):
-    allActionsArr = np.array(mfosAgents[mfosAgent].allActions)
-    centerFreq = allActionsArr[:, 0]
-    diffs = np.abs(np.diff(centerFreq))
-
-    x, mean, std = mean_std_every_n(diffs, block)
-    plt.plot(x, mean, label=f"M-FOS Agent {mfosAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-
-for dpgAgent in range(numDpgAgents):
-    allActionsArr = np.array(dpgAgents[dpgAgent].allActions)
-    centerFreq = allActionsArr[:, 0]
-    diffs = np.abs(np.diff(centerFreq))
-
-    x, mean, std = mean_std_every_n(diffs, block)
-    plt.plot(x, mean, label=f"DPG Agent {dpgAgent+1}")
-    plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-        
 plt.xlabel("Time Step (1 = 52,428.8 usec = 1 CPI)")
 plt.ylabel("Mean |Δ Center Frequency| (MHz)")
 plt.title("Average Center Frequency Change Over Time")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
+plt.margins(x=0, y=0)
 plt.show()
+
+rows = []
+
+agent_types = [
+    ("RandomStart", randomStartAgents, reward_summary, coll_summary),
+    ("SAA", saaAgents, reward_summary, coll_summary, bw_summary, delta_bw_summary, delta_cf_summary),
+    ("PPO", ppoAgents, reward_summary, coll_summary, bw_summary, delta_bw_summary, delta_cf_summary),
+    ("DQN", dqnAgents, reward_summary, coll_summary, bw_summary, delta_bw_summary, delta_cf_summary),
+    ("MFOS", mfosAgents, reward_summary, coll_summary, bw_summary, delta_bw_summary, delta_cf_summary),
+    ("DPG", dpgAgents, reward_summary, coll_summary, bw_summary, delta_bw_summary, delta_cf_summary),
+]
+
+def get_stat(stat_list, agent_type, idx, key):
+    for s in stat_list:
+        if s["agent_type"] == agent_type and s["agent_idx"] == idx:
+            return s.get(key, None)
+    return None
+
+# Build rows
+for agent_type, agents, *stat_lists in agent_types:
+    for idx, agent in enumerate(agents):
+        row = {
+            "Agent": f"{agent_type}_{idx+1}",
+            "AvgReward": get_stat(reward_summary, agent_type, idx, "avg_reward"),
+            "StdReward": get_stat(reward_summary, agent_type, idx, "std_reward"),
+            "AvgCollision": get_stat(coll_summary, agent_type, idx, "avg_coll"),
+            "StdCollision": get_stat(coll_summary, agent_type, idx, "std_coll"),
+        }
+        if agent_type != "RandomStart":  # these have BW / ΔBW / ΔCF stats
+            row.update({
+                "AvgBW": get_stat(bw_summary, agent_type, idx, "avg_bw"),
+                "StdBW": get_stat(bw_summary, agent_type, idx, "std_bw"),
+                "AvgDeltaBW": get_stat(delta_bw_summary, agent_type, idx, "avg_delta_bw"),
+                "StdDeltaBW": get_stat(delta_bw_summary, agent_type, idx, "std_delta_bw"),
+                "AvgDeltaCF": get_stat(delta_cf_summary, agent_type, idx, "avg_delta_cf"),
+                "StdDeltaCF": get_stat(delta_cf_summary, agent_type, idx, "std_delta_cf"),
+            })
+        rows.append(row)
+
+# Save to Excel
+df = pd.DataFrame(rows)
+df = df.round(4)
+
+base, ext = os.path.splitext(output_file)
+i = 1
+
+while True:
+    try:
+        df.to_excel(output_file, index=False)
+        print(f"\nSaved evaluation summary to {output_file}")
+        break
+    except PermissionError:
+        output_file = f"{base}_{i}{ext}"
+        i += 1
+
+print(f"\nSaved evaluation summary to {output_file}")
+print("\n=== Evaluation Summary ===")
+print(df)
+
 input("Press Enter to close all plots and exit...")

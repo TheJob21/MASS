@@ -15,21 +15,21 @@ class StaticAgent(Agent):
         super().__init__(currentAction, fftSize)
         self.rng = rng
         self.staticType = staticType
-        if self.staticType == 0:
+        if self.staticType == StaticType.Fat:
             self.minBw = 150
             self.maxBw = 175
             self.txTimeMin = 100
             self.txTimeMax = 250
             self.deadTimeMin = 9000
             self.deadTimeMax = 10000
-        elif self.staticType == 1:
+        elif self.staticType == StaticType.Skinny:
             self.minBw = 15
             self.maxBw = 30
             self.txTimeMin = 225
             self.txTimeMax = 350
             self.deadTimeMin = 1900
             self.deadTimeMax = 2100
-        elif self.staticType == 2:
+        elif self.staticType == StaticType.Pulsed:
             self.minBw = 25
             self.maxBw = 50
             self.txTimeMin = 20
@@ -38,7 +38,7 @@ class StaticAgent(Agent):
             self.deadTimeMax = 80
             self.intervalMin = 2000
             self.intervalMax = 5000
-        elif self.staticType == 3:
+        elif self.staticType == StaticType.Rectangular:
             self.minBw = 60
             self.maxBw = 680
             self.txTimeMin = 45
@@ -56,14 +56,14 @@ class StaticAgent(Agent):
             start = np.random.randint(0, self.fftSize - length + 1)
             self.txTime = np.random.randint(self.txTimeMin, self.txTimeMax + 1)
             self.deadTime = np.random.randint(self.deadTimeMin, self.deadTimeMax + 1)
-            if self.staticType == 2:
+            if self.staticType == StaticType.Pulsed:
                 self.interval = np.random.randint(self.intervalMin, self.intervalMax + 1)
         else:
             length = self.rng.integers(self.minBw, self.maxBw + 1)
             start = self.rng.integers(0, self.fftSize - length + 1)
             self.txTime = self.rng.integers(self.txTimeMin, self.txTimeMax + 1)
             self.deadTime = self.rng.integers(self.deadTimeMin, self.deadTimeMax + 1)
-            if self.staticType == 2:
+            if self.staticType == StaticType.Pulsed:
                 self.interval = self.rng.integers(self.intervalMin, self.intervalMax + 1)
             
         stop = start + length
@@ -74,10 +74,10 @@ class StaticAgent(Agent):
         if iteration % (self.txTime+self.deadTime) > self.txTime:
             self.currentAction = None
             return
-        if self.staticType == 2 and (iteration % (self.interval * 2)) > self.interval:
+        if self.staticType == StaticType.Pulsed and (iteration % (self.interval * 2)) > self.interval:
             self.currentAction = None
             return
-        if self.staticType == 3 and (iteration % ((self.txTime+self.deadTime) * 2)) > self.txTime+self.deadTime:
+        if self.staticType == StaticType.Rectangular and (iteration % ((self.txTime+self.deadTime) * 2)) > self.txTime+self.deadTime:
             self.takeRandomAction()
 
         start, stop = self.actionToWobble
