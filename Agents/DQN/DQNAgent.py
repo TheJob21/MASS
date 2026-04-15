@@ -1,9 +1,9 @@
-from SpectrumDQN import SpectrumDQN
-from ReplayBuffer import ReplayBuffer
+from Agents.DQN.SpectrumDQN import SpectrumDQN
+from Agents.Util.ReplayBuffer import ReplayBuffer
 import torch
 import torch.nn as nn
 import numpy as np
-from CognitiveAgent import CognitiveAgent
+from Agents.CognitiveAgent import CognitiveAgent
 
 class DQNAgent(CognitiveAgent):
     def __init__(self, actionList, currentAction=None, fftSize=1024, cpiLen=256, device="cpu"):

@@ -1,4 +1,4 @@
-from CognitiveAgent import CognitiveAgent
+from Agents.CognitiveAgent import CognitiveAgent
 
 class SAAAgent(CognitiveAgent):
     def __init__(self, currentAction=None, fftSize=1024, cpiLen=256):

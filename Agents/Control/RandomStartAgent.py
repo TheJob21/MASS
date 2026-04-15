@@ -1,4 +1,4 @@
-from CognitiveAgent import CognitiveAgent
+from Agents.CognitiveAgent import CognitiveAgent
 import numpy as np
 
 class FixedStartAgent(CognitiveAgent):

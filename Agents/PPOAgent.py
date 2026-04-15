@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from NormalWithRNG import NormalWithRNG
-from CognitiveAgent import CognitiveAgent
+from Agents.Util.NormalWithRNG import NormalWithRNG
+from Agents.CognitiveAgent import CognitiveAgent
 
 class RecurrentSpectrumPPO(nn.Module):
     def __init__(

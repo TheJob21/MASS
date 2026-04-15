@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from collections import deque
-from CognitiveAgent import CognitiveAgent
+from Agents.CognitiveAgent import CognitiveAgent
 import random
 
 

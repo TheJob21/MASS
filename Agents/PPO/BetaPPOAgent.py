@@ -4,7 +4,7 @@ import numpy as np
 from torch.distributions import Beta
 
 from PPOActorCritic import RecurrentAttentionPPO
-from CognitiveAgent import CognitiveAgent
+from Agents.CognitiveAgent import CognitiveAgent
 
 
 def continuous_action_to_interval(center, bandwidth, fftSize=1024):

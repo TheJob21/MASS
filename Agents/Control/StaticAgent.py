@@ -1,4 +1,4 @@
-from Agent import Agent
+from Agents.Agent import Agent
 import numpy as np
 import random
 from enum import Enum

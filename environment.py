@@ -5,16 +5,16 @@ import colorsys
 import torch
 import numpy as np
 import pandas as pd
-from StaticAgent import StaticAgent
-from StaticAgent import StaticType
-from SAAAgent import SAAAgent
-from PPOAgent import PPOAgent
+from Agents.Control.StaticAgent import StaticAgent
+from Agents.Control.StaticAgent import StaticType
+from Agents.Control.SAAAgent import SAAAgent
+from Agents.PPO.PPOAgent import PPOAgent
 #from BetaPPOAgent import PPOAgent
-from DQNAgent import DQNAgent
-from DPGAgent import DPGAgent
-from RandomStartAgent import FixedStartAgent
-from MFOSAgent2 import AblatedMFOSAgent
-from MFOSAgent2 import MFOSAgent
+from Agents.DQN.DQNAgent import DQNAgent
+from Agents.DPG.DPGAgent import DPGAgent
+from Agents.Control.RandomStartAgent import FixedStartAgent
+from Agents.MFOS.MFOSAgent2 import AblatedMFOSAgent
+from Agents.MFOS.MFOSAgent2 import MFOSAgent
 from collections import deque
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm

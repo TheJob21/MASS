@@ -1,4 +1,4 @@
-from Agent import Agent
+from Agents.Agent import Agent
 
 class CognitiveAgent(Agent):
     def __init__(self, currentAction=None, fftSize=1024, cpiLen=256):
