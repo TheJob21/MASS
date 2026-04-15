@@ -415,7 +415,7 @@ class MFOSAgent(CognitiveAgent):
         if base_genome is None:
             for _ in range(population_size):
                 individual = MFOSIndividual(
-                    self._random_genome()
+                    random_genome(self.np_rng)
                 )
                 self.policy = RNN(individual.genome, fftSize=fftSize, device=device, seed=seed)
                 self.population.append(individual)
@@ -587,7 +587,7 @@ class MFOSAgent(CognitiveAgent):
         for _ in range(fresh_count):
 
             new_individual = MFOSIndividual(
-                self._random_genome()
+                random_genome(self.np_rng)
             )
 
             new_population.append(new_individual)
@@ -644,20 +644,49 @@ class MFOSAgent(CognitiveAgent):
                 "exploration_center", "exploration_bw"]
         return np.sqrt(sum((g1[k] - g2[k])**2 for k in keys))
     
-    def _random_genome(self):
-        g = {}
+def random_genome(np_rng):
+    g = {}
 
-        # Learning rate (log-uniform is important)
-        g["lr"] = 10 ** self.np_rng.uniform(-5, -3)
+    # Learning rate (log-uniform is important)
+    g["lr"] = 10 ** np_rng.uniform(-5, -3)
 
-        # Discount factor
-        g["gamma"] = self.np_rng.uniform(0.9, 0.999)
+    # Discount factor
+    g["gamma"] = np_rng.uniform(0.9, 0.999)
 
-        # Exploration params
-        g["exploration_center"] = self.np_rng.uniform(0.01, 0.3)
-        g["exploration_bw"] = self.np_rng.uniform(0.01, 0.2)
+    # Exploration params
+    g["exploration_center"] = np_rng.uniform(0.01, 0.3)
+    g["exploration_bw"] = np_rng.uniform(0.01, 0.2)
 
-        # Entropy
-        g["entropy_coef"] = 10 ** self.np_rng.uniform(-4, -2)
+    # Entropy
+    g["entropy_coef"] = 10 ** np_rng.uniform(-4, -2)
 
-        return g
+    return g
+    
+class AblatedMFOSAgent(CognitiveAgent):
+    def __init__(self, 
+        currentAction=None, 
+        fftSize=1024, 
+        cpiLen=256,
+        device='cpu',
+        seed=0
+    ):
+        super().__init__(currentAction, fftSize, cpiLen)
+        self.eval_mode = False
+        self.np_rng = np.random.default_rng(seed)
+        self.policy = RNN(random_genome(self.np_rng), fftSize=fftSize, device=device, seed=seed)
+
+    def set_eval_mode(self):
+        self.eval_mode = True
+    
+    def select_action(self, state_seq_np):
+        self.currentAction = self.policy.select_action(
+            state_seq_np, 
+            self.cpiIndex / self.cpiLen, 
+            self.eval_mode
+        )
+    
+    def record_reward(self, reward):
+        self.policy.record_reward(reward)
+
+    def update(self):
+        self.policy.update()

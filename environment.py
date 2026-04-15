@@ -13,6 +13,7 @@ from PPOAgent import PPOAgent
 from DQNAgent import DQNAgent
 from DPGAgent import DPGAgent
 from RandomStartAgent import FixedStartAgent
+from MFOSAgent2 import AblatedMFOSAgent
 from MFOSAgent2 import MFOSAgent
 from collections import deque
 import matplotlib.pyplot as plt
@@ -553,7 +554,7 @@ spectrumSampleSize=30_000
 allStates = []
 deadspace = [] # MHz
 device = "cpu"
-seed = 422069
+seed = 432069
 staticAgentRNG = np.random.default_rng(seed)
 seed += 1
 randomStartAgentRNG = np.random.default_rng(seed)
@@ -614,7 +615,7 @@ if not sim:
         print("Saved precomputed states:", liveData.shape)
 
 iterations = 1_000_000 if sim else liveData.shape[0]
-multiAgent = True
+multiAgent = False
 # iterations *= 3
 eval = False
 timestep = pulseWidth = 10.24
@@ -645,7 +646,7 @@ randomStartAgentStartIndices = []
 for randAgent in range(numRandomStartAgents):
     randomStartAgents.append(FixedStartAgent(rng=randomStartAgentRNG))
     randomStartAgents[randAgent].storeAction(intervalToCenterFreqBW(randomStartAgents[randAgent].currentAction))
-    randomStartAgentStartIndices.append(0)#torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+    randomStartAgentStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
     allCogAgents.append(randomStartAgents[randAgent])
     
 # SAA Agent Parameters
@@ -654,7 +655,7 @@ saaAgents = []
 saaAgentStartIndices = []
 for saaAgent in range(numSaaAgents):
     saaAgents.append(SAAAgent())
-    saaAgentStartIndices.append(0)#torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+    saaAgentStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
     allCogAgents.append(saaAgents[saaAgent])
     
 # PPO Agent Parameters
@@ -685,7 +686,7 @@ for dqnAgent in range(numDqnAgents):
     allCogAgents.append(dqnAgents[dqnAgent])
 
 # M-FOS Agent Initialization
-numMfosAgents = 3
+numMfosAgents = 5
 mfosAgents = []
 mfosAgentStartIndices = []
 for mfosAgentI in range(numMfosAgents):
@@ -721,6 +722,21 @@ for i in range(numDpgAgents):
     dpgAgentStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
     allCogAgents.append(dpgAgents[i])
 
+# Ablated M-FOS Agent Initialization
+numAblatedMfosAgents = 5
+ablatedMFOSAgents = []
+ablatedMfosAgentStartIndices = []
+for mfosAgentI in range(numAblatedMfosAgents):
+    ablatedMfosAgent = AblatedMFOSAgent(
+        fftSize=fftSize,
+        cpiLen=cpiLen,
+        device=device,
+        seed=seed + mfosAgentI + 1 #42075 is good for random genomes and weights?
+    )
+    ablatedMFOSAgents.append(ablatedMfosAgent)
+    ablatedMfosAgentStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+    allCogAgents.append(ablatedMfosAgent)
+
 lastPulseStates = []
 for agent in allCogAgents:
     lastPulseStates.append(deque(maxlen=iterationsInPulse))
@@ -739,6 +755,8 @@ for i in range(iterations): # 1 = 12.8 microseconds
             dqnAgent.epsilon = 0.0
         for mfosAgent in mfosAgents:
             mfosAgent.set_eval_mode()
+        for ablatedMfosAgent in ablatedMFOSAgents:
+            ablatedMfosAgent.set_eval_mode()
             
     if i % 100_000 == 0:
         print(int(i/1000), "K iterations completed.")
@@ -821,6 +839,17 @@ for i in range(iterations): # 1 = 12.8 microseconds
         elif i % iterationsInPulse == ((dpgAgentStartIndices[dpgAgentI]+1) % iterationsInPulse):
             dpgAgents[dpgAgentI].isTransmitting = False
 
+    # Ablated M-FOS agent action selection   
+    for ablatedMfosAgentI in range(numAblatedMfosAgents):      
+        if i % iterationsInPulse == ablatedMfosAgentStartIndices[mfosAgentI]:
+            ablatedMfosAgent = ablatedMFOSAgents[ablatedMfosAgentI]
+            agentStates = lastPulseStates[ablatedMfosAgentI + numRandomStartAgents + numSaaAgents + numPpoAgents + numDqnAgents + numMfosAgents + numDpgAgents]
+            if len(agentStates) == iterationsInPulse:
+                obs_seq = np.stack(agentStates)
+                ablatedMfosAgent.select_action(obs_seq)
+                ablatedMfosAgent.storeAction(intervalToCenterFreqBW(ablatedMfosAgent.currentAction))
+        elif i % iterationsInPulse == ((ablatedMfosAgentStartIndices[ablatedMfosAgentI]+1) % iterationsInPulse):
+            ablatedMFOSAgents[ablatedMfosAgentI].isTransmitting = False
             
     # Static Agent Actions. Simulate frequency changes
     currentState = initState(fftSize)
@@ -914,7 +943,14 @@ for i in range(iterations): # 1 = 12.8 microseconds
                 )
 
                 dpgAgent.train_step()
-            
+        
+        # Update Ablated M-FOS Agents  
+        for ablatedMfosAgent in ablatedMFOSAgents:
+            rewardCount = len(ablatedMfosAgent.allRewards)
+            if rewardCount > 0 and rewardCount % iterationsInPulse == 0:
+                ablatedMfosAgent.record_reward(reward=sum(ablatedMfosAgent.allRewards[-iterationsInPulse:]))
+                ablatedMfosAgent.update()
+
     if not eval:
         if i % (iterationsInPulse * 1000) == 0:
             for dqnAgent in dqnAgents:
@@ -948,7 +984,9 @@ for mfosAgent in range(numMfosAgents):
     print("M-FOS Agent", mfosAgent+1 if mfosAgent > 0 else "", cumulativeRewardString, sum(mfosAgents[mfosAgent].allRewards[int(len(mfosAgents[mfosAgent].allRewards)*.8):]))
 for dpgAgent in range(numDpgAgents):
     print("DPG Agent", dpgAgent+1 if dpgAgent > 0 else "", cumulativeRewardString, sum(dpgAgents[dpgAgent].allRewards[int(len(dpgAgents[dpgAgent].allRewards)*.8):]))
-          
+for ablatedMFOSAgent in range(numAblatedMfosAgents):
+    print("Ablated M-FOS Agent", ablatedMFOSAgent+1 if ablatedMFOSAgent > 0 else "", cumulativeRewardString, sum(ablatedMFOSAgents[ablatedMFOSAgent].allRewards[int(len(ablatedMFOSAgents[ablatedMFOSAgent].allRewards)*.8):]))
+           
 
 # Spectrum Usage and collisions per agent over time 
 states_list, alphas_list = zip(*allStates)
@@ -956,7 +994,7 @@ stateMatrix = np.stack(states_list)
 alphaMatrix = np.stack(alphas_list)
 
 colors = []
-colorCount = numRandomStartAgents + numSaaAgents + numPpoAgents + numDqnAgents + numMfosAgents + numDpgAgents + 3
+colorCount = numRandomStartAgents + numSaaAgents + numPpoAgents + numDqnAgents + numMfosAgents + numDpgAgents + numAblatedMfosAgents + 3
 
 cmap = build_agent_colormap(colorCount)
 bounds = []
@@ -1001,6 +1039,8 @@ for mfosAgent in range(numMfosAgents):
     tickLabels.append("M-FOS " + (str(mfosAgent + 1) if mfosAgent > 0 else ""))
 for dpgAgent in range(numDpgAgents):
     tickLabels.append("DPG " + (str(dpgAgent + 1) if dpgAgent > 0 else ""))
+for ablatedMfosAgent in range(numAblatedMfosAgents):
+    tickLabels.append("Ablated M-FOS  " + (str(ablatedMfosAgent + 1) if ablatedMfosAgent > 0 else ""))
 tickLabels.append("Collision")
 
 cbar.ax.set_yticklabels(tickLabels)
@@ -1029,7 +1069,8 @@ for agent_type, agents, label_prefix in [
     ("PPO", ppoAgents, "PPO Agent"),
     ("DQN", dqnAgents, "DQN Agent"),
     ("MFOS", mfosAgents, "M-FOS Agent"),
-    ("DPG", dpgAgents, "DPG Agent")
+    ("DPG", dpgAgents, "DPG Agent"),
+    ("Ablated MFOS", ablatedMFOSAgents, "Ablated MFOS Agent")
 ]:
     for idx, agent in enumerate(agents):
         allRewards = np.array(agent.allRewards)
@@ -1062,7 +1103,8 @@ for agent_type, agents, label_prefix in [
     ("PPO", ppoAgents, "PPO Agent"),
     ("DQN", dqnAgents, "DQN Agent"),
     ("MFOS", mfosAgents, "M-FOS Agent"),
-    ("DPG", dpgAgents, "DPG Agent")
+    ("DPG", dpgAgents, "DPG Agent"),
+    ("Ablated MFOS", ablatedMFOSAgents, "Ablated MFOS Agent")
 ]:
     for idx, agent in enumerate(agents):
         allActionsArr = np.array(agent.allActions)
@@ -1100,7 +1142,8 @@ for agent_type, agents, label_prefix in [
     ("PPO", ppoAgents, "PPO Agent"),
     ("DQN", dqnAgents, "DQN Agent"),
     ("MFOS", mfosAgents, "M-FOS Agent"),
-    ("DPG", dpgAgents, "DPG Agent")
+    ("DPG", dpgAgents, "DPG Agent"),
+    ("Ablated MFOS", ablatedMFOSAgents, "Ablated MFOS Agent")
 ]:
     for idx, agent in enumerate(agents):
         allCollisionsArr = np.array(agent.collisions)
@@ -1148,7 +1191,8 @@ for agent_type, agents, label_prefix in [
     ("PPO", ppoAgents, "PPO Agent"),
     ("DQN", dqnAgents, "DQN Agent"),
     ("MFOS", mfosAgents, "M-FOS Agent"),
-    ("DPG", dpgAgents, "DPG Agent")
+    ("DPG", dpgAgents, "DPG Agent"),
+    ("Ablated MFOS", ablatedMFOSAgents, "Ablated MFOS Agent")
 ]:
     for idx, agent in enumerate(agents):
         allActionsArr = np.array(agent.allActions)
@@ -1181,7 +1225,8 @@ for agent_type, agents, label_prefix in [
     ("PPO", ppoAgents, "PPO Agent"),
     ("DQN", dqnAgents, "DQN Agent"),
     ("MFOS", mfosAgents, "M-FOS Agent"),
-    ("DPG", dpgAgents, "DPG Agent")
+    ("DPG", dpgAgents, "DPG Agent"),
+    ("Ablated MFOS", ablatedMFOSAgents, "Ablated MFOS Agent")
 ]:
     for idx, agent in enumerate(agents):
         allActionsArr = np.array(agent.allActions)
@@ -1215,6 +1260,7 @@ agent_types = [
     ("DQN", dqnAgents, reward_summary, coll_summary, bw_summary, delta_bw_summary, delta_cf_summary),
     ("MFOS", mfosAgents, reward_summary, coll_summary, bw_summary, delta_bw_summary, delta_cf_summary),
     ("DPG", dpgAgents, reward_summary, coll_summary, bw_summary, delta_bw_summary, delta_cf_summary),
+    ("Ablated MFOS", ablatedMFOSAgents, "Ablated MFOS Agent")
 ]
 
 def get_stat(stat_list, agent_type, idx, key):
