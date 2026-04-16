@@ -228,7 +228,7 @@ def computeRewardsForAgents(
                 
                 reward -= (collisionFrac * (collisionWeight / 30))
 
-        cogAgent.allRewards.append(reward)
+        cogAgent.storeReward(reward)
         
 def worstReward(rewardMap, end_t, window=256):
     return min(
@@ -586,14 +586,14 @@ collisionWeight = (transmissionWeight / collisionTransmissionTolRatio) #* (1 - b
 
 output_file = "agent_eval_summary.xlsx"
 liveDataFilename = '../spectrum_245ghz.dat' # 2.4-2.5 GHz
-liveDataFilename = '../spectrum_264ghz.dat' # 2.59-2.69 GHz
+# liveDataFilename = '../spectrum_264ghz.dat' # 2.59-2.69 GHz
 storedStateFile = '../spectrum_245ghz.npz' if liveDataFilename == '../spectrum_245ghz.dat' else '../spectrum_264ghz.npz' # 2.4-2.5 GHz
 startingFrequency = 2400 if storedStateFile == '../spectrum_245ghz.npz' else 2590
 
 fileSize = os.path.getsize(liveDataFilename)
 
 # If precomputed file exists, just load it
-sim = True # Set False for live data
+sim = False # Set False for live data
 if not sim:
     if os.path.exists(storedStateFile):
         npz = np.load(storedStateFile)
@@ -625,9 +625,9 @@ allCogAgents = []
 
 # Static Agents For Simulating Environment
 staticAgents = []
-numLargeAgents = 3 # pw .1 - .25K, interval 10K, 150-175 bins wide
-numSkinnyAgents = 4 # pw .25K, interval 2K, 20 bins wide
-numPulsedAgents = 5 # pw .1K, interval = 4K, 30-40 bins wide on/off
+numLargeAgents = 0 # pw .1 - .25K, interval 10K, 150-175 bins wide
+numSkinnyAgents = 0 # pw .25K, interval 2K, 20 bins wide
+numPulsedAgents = 0 # pw .1K, interval = 4K, 30-40 bins wide on/off
 numRectangleAgents = 0 # pw = 50, interval = 10 -250,  60-680 bins
 numStaticAgents = numLargeAgents + numSkinnyAgents + numPulsedAgents + numRectangleAgents
 for staticAgent in range(numLargeAgents):
@@ -640,7 +640,7 @@ for staticAgent in range(numRectangleAgents):
     staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Rectangular))
 
 # Random Single Action Agent
-numRandomStartAgents = 0
+numRandomStartAgents = 5
 randomStartAgents = []
 randomStartAgentStartIndices = []
 for randAgent in range(numRandomStartAgents):
@@ -650,7 +650,7 @@ for randAgent in range(numRandomStartAgents):
     allCogAgents.append(randomStartAgents[randAgent])
     
 # SAA Agent Parameters
-numSaaAgents = 0 # Sense-And-Avoid
+numSaaAgents = 5 # Sense-And-Avoid
 saaAgents = []
 saaAgentStartIndices = []
 for saaAgent in range(numSaaAgents):
@@ -659,7 +659,7 @@ for saaAgent in range(numSaaAgents):
     allCogAgents.append(saaAgents[saaAgent])
     
 # PPO Agent Parameters
-numPpoAgents = 0 # Proximal Policy Optimization
+numPpoAgents = 5 # Proximal Policy Optimization
 ppoAgents = []
 ppoAgentStartIndices = []
 for ppoAgent in range(numPpoAgents):
@@ -677,7 +677,7 @@ for bw in BANDWIDTHS:
         stop  = min(fftSize, start + bw)
         if stop - start == bw:
             DQN_ACTIONS.append((start, stop))
-numDqnAgents = 0
+numDqnAgents = 5
 dqnAgents = []
 dqnAgentStartIndices = []
 for dqnAgent in range(numDqnAgents):
@@ -903,41 +903,36 @@ for i in range(iterations): # 1 = 12.8 microseconds
     if not eval and i > 0 and len(lastPulseStates) > 0 and len(lastPulseStates[0]) == iterationsInPulse: # every 204.8 usec
         # Update PPO Agents
         for ppoAgent in ppoAgents:
-            rewardCount = len(ppoAgent.allRewards)
-            if rewardCount > 0 and rewardCount % iterationsInPulse == 0:
+            if len(ppoAgent.allRewards) > 0 and len(ppoAgent.pulseRewards) == 0:
                 ppoAgent.store_reward(
-                    reward=sum(ppoAgent.allRewards[-iterationsInPulse:]),
+                    reward=ppoAgent.allRewards[-1],
                     done=False
                 )
                 ppoAgent.update()
         # Update DQN Agents
         for dqnAgent in dqnAgents:
-            rewardCount = len(dqnAgent.allRewards)
-            if rewardCount > 0 and rewardCount % iterationsInPulse == 0:
+            if len(dqnAgent.allRewards) > 0 and len(dqnAgent.pulseRewards) == 0:
                 dqnAgent.buffer.push(
                     state_t,
                     action_idx,
-                    sum(dqnAgent.allRewards[-iterationsInPulse:]),
+                    dqnAgent.allRewards[-1],
                     currentState.astype(np.float32),
                     False
                 )
                 dqnAgent.train_step(rng=dqnAgentRNG)
         # Update M-FOS Agents  
         for mfosAgent in mfosAgents:
-            rewardCount = len(mfosAgent.allRewards)
-            if rewardCount > 0 and rewardCount % iterationsInPulse == 0:
-                mfosAgent.record_reward(reward=sum(mfosAgent.allRewards[-iterationsInPulse:]))
+            if len(mfosAgent.allRewards) > 0 and len(mfosAgent.pulseRewards) == 0:
+                mfosAgent.record_reward(reward=mfosAgent.allRewards[-1])
                 mfosAgent.update()
 
         # Update DPG Agents:
         for dpgAgent in dpgAgents:
-            rewardCount = len(dpgAgent.allRewards)
-            if rewardCount > 0 and rewardCount % iterationsInPulse == 0:
-                reward = sum_recent_rewards(dpgAgent.allRewards, rewardCount, window=iterationsInPulse)
+            if len(dpgAgent.allRewards) > 0 and len(dpgAgent.pulseRewards) == 0:
                 dpgAgent.buffer.push(
                     state_dpg,
                     dpgAgent.lastAction,
-                    sum(dpgAgent.allRewards[-iterationsInPulse:]),
+                    dpgAgent.allRewards[-1],
                     currentState.astype(np.float32),
                     False
                 )
@@ -946,9 +941,8 @@ for i in range(iterations): # 1 = 12.8 microseconds
         
         # Update Ablated M-FOS Agents  
         for ablatedMfosAgent in ablatedMFOSAgents:
-            rewardCount = len(ablatedMfosAgent.allRewards)
-            if rewardCount > 0 and rewardCount % iterationsInPulse == 0:
-                ablatedMfosAgent.record_reward(reward=sum(ablatedMfosAgent.allRewards[-iterationsInPulse:]))
+            if len(ablatedMfosAgent.allRewards) > 0 and len(ablatedMfosAgent.pulseRewards) == 0:
+                ablatedMfosAgent.record_reward(reward=ablatedMfosAgent.allRewards[-1])
                 ablatedMfosAgent.update()
 
     if not eval:
@@ -967,7 +961,7 @@ for i in range(iterations): # 1 = 12.8 microseconds
                     print("Best genome:", mfosAgent.population[best].genome)
                     print(f"Evolving MFOS Agent {idx+1} population...")
                     mfosAgent.evolve()
-      
+
 liveData = None
                     
 # Print Cumulative Rewards
@@ -1061,7 +1055,7 @@ reward_summary, bw_summary, coll_summary, delta_bw_summary, delta_cf_summary = [
 
 # Agent Reward Mean over time plot
 plt.figure(figsize=(12, 8))
-block = cpiLen * iterationsInPulse
+block = cpiLen
 
 for agent_type, agents, label_prefix in [
     ("RandomStart", randomStartAgents, "Random Start Agent"),

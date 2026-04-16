@@ -1,20 +1,24 @@
 from Agents.Agent import Agent
 
 class CognitiveAgent(Agent):
-    def __init__(self, currentAction=None, fftSize=1024, cpiLen=256):
+    def __init__(self, currentAction=None, fftSize=1024, cpiLen=256, iterationsPerPulse=20):
         super().__init__(currentAction=currentAction, fftSize=fftSize)
         self.cpiLen = cpiLen
         self.allActions = [] # array of tuples (centerFreq (MHz), BW (MHz))
         self.collisions = [] # array of total frequency overlap in MHz
-        self.allRewards = [] # array of reward per timestep
+        self.allRewards = [] # array of reward per pulse
+        self.pulseRewards = [] # array of rewards in current pulse
+        self.iterationsPerPulse = iterationsPerPulse
         self.sumCenterFreqForCPI = 0
         self.sumBwForCPI = 0
         self.isTransmitting = False
         self.cpiIndex = 0
-        
-        # self.txFracs = []
-        # self.collFracs = []
-        # self.centerErrorFracs = []
+
+    def storeReward(self, reward):
+        self.pulseRewards.append(reward)
+        if len(self.pulseRewards) == self.iterationsPerPulse:
+            self.allRewards.append(sum(self.pulseRewards))
+            self.pulseRewards = []
     
     def storeAction(self, newAction):
         self.allActions.append(newAction)

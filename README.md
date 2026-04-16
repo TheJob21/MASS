@@ -1,2 +1,2 @@
 # MASS
-Multi Agent Spectrum Sharing for Cognitive Radio
+Multi Agent Spectrum Sharing for Cognitive Radar
