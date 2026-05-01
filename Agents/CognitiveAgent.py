@@ -44,6 +44,13 @@ class CognitiveAgent(Agent):
             return 0
         return self.sumBwForCPI / self.cpiIndex
     
+    def curActionAsCenterFreqBW(self, binSize, startingFrequency):
+        
+        if self.currentAction == None:
+            return (0,0)
+        intervalBW = binSize * (self.currentAction[1] - self.currentAction[0]) # MHz
+        centerFreq = startingFrequency + ((binSize * self.currentAction[0]) + (intervalBW / 2)) # MHz
+        return (centerFreq, intervalBW)
     
     @staticmethod
     def continuous_action_to_interval1(start_action, width_action, fftSize=1024):
