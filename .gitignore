@@ -1,3 +1,4 @@
 *.xlsx
 *.dat
+__pycache__
 *.pyc
