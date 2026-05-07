@@ -81,7 +81,7 @@ class SignalProcessor:
             mag,
             window_size=32,
             k=self.cfg.HOCAE_ORDER_SELECTION,
-            Pfa=1e-2
+            Pfa=1.75e-2
         )
         # Boolean occupancy state
         occupancy = mag > thresh

@@ -1,24 +1,34 @@
+import torch
 # ============================================================
 # GENERAL EXECUTION SETTINGS
 # ============================================================
 
 SIM_MODE = True          # True = synthetic, False = live spectrum
-MULTI_AGENT = False
+MULTI_AGENT = True
 EVAL_MODE = False
 
-DEVICE = "cpu"
-SEED = 432069
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+SEED = 42069
 
-OUTPUT_FILE = "agent_eval_summary.xlsx"
+OUTPUT_FILE = "./Output/agent_eval_summarySimMulti.xlsx"
+
+DATA_CHOICE = "245"
+DATA_CHOICE = "u245"
+# DATA_CHOICE = "264"
+# DATA_CHOICE = "u264"
 
 SPECTRUM_FILES = {
-    "245": "../spectrum_245ghz.dat",
-    "264": "../spectrum_264ghz.dat"
+    "245": "./Data/spectrum_245ghz.dat",
+    "u245": "./Data/union_spectrum_245ghz.dat",
+    "264": "./Data/spectrum_264ghz.dat",
+    "u264": "./Data/union_spectrum_264ghz.dat"
 }
 
 STORED_STATE_MAP = {
-    "../spectrum_245ghz.dat": "../spectrum_245ghz.npz",
-    "../spectrum_264ghz.dat": "../spectrum_264ghz.npz"
+    "./Data/spectrum_245ghz.dat": "./Data/spectrum_245ghz.npz",
+    "./Data/union_spectrum_245ghz.dat": "./Data/union_spectrum_245ghz.npz",
+    "./Data/spectrum_264ghz.dat": "./Data/spectrum_264ghz.npz",
+    "./Data/union_spectrum_264ghz.dat": "./Data/union_spectrum_264ghz.npz"
 }
 
 # ============================================================
@@ -33,8 +43,10 @@ PRI = 204.8
 CPI_LEN = 256
 
 STARTING_FREQUENCY_MAP = {
-    "../spectrum_245ghz.npz": 2400,
-    "../spectrum_264ghz.npz": 2590
+    "./Data/spectrum_245ghz.npz": 2400,
+    "./Data/union_spectrum_245ghz.npz": 2400,
+    "./Data/spectrum_264ghz.npz": 2590,
+    "./Data/union_spectrum_264ghz.npz": 2590
 }
 
 HOCAE_WINDOW_SIZE = 32
@@ -47,18 +59,18 @@ HOCAE_PFA = 1e-2
 
 AGENTS = {
     "static": {
-        "fat": 1,
-        "skinny": 1,
-        "pulsed": 1,
-        "rectangular": 1
+        "fat": 3,
+        "skinny": 4,
+        "pulsed": 5,
+        "rectangular": 0
     },
-    "random_start": 1,
-    "saa": 1,
+    "random_start": 0,
+    "saa": 0,
     "ppo": 1,
     "dqn": 1,
     "mfos": 1,
-    "dpg": 1,
-    "ablated_mfos": 1
+    "dpg": 0,
+    "ablated_mfos": 0
 }
 
 # ============================================================
@@ -129,7 +141,7 @@ REWARD["collision_weight"] = (
 # RUNTIME CONTROL
 # ============================================================
 
-ITERATIONS = 100_000
+ITERATIONS = 1_000_000
 SPECTRUM_SAMPLE_SIZE = 30_000
 
 EVAL_SPLIT = 0.8

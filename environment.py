@@ -307,16 +307,12 @@ class Environment:
         torch.Generator(device=self.cfg.DEVICE).manual_seed(self.cfg.SEED)
 
 
-        liveDataFilename = self.cfg.SPECTRUM_FILES['245'] # 2.4-2.5 GHz
-        liveDataFilename = self.cfg.SPECTRUM_FILES['264'] # 2.59-2.69 GHz
+        liveDataFilename = self.cfg.SPECTRUM_FILES[self.cfg.DATA_CHOICE]
         storedStateFile = self.cfg.STORED_STATE_MAP[liveDataFilename]
         startingFrequency = self.cfg.STARTING_FREQUENCY_MAP[storedStateFile]
 
-        if os.path.exists(liveDataFilename):
-            fileSize = os.path.getsize(liveDataFilename)
-        else:
-            fileSize = 0  # or None, or raise a custom error depending on your logic
-            print(f"Warning: file not found -> {liveDataFilename}")
+        if not self.cfg.SIM_MODE and not os.path.exists(storedStateFile) and not os.path.exists(liveDataFilename):
+            print(f"Warning: files not found -> {storedStateFile} -> {liveDataFilename}")
             self.cfg.SIM_MODE = True
 
         # If precomputed file exists, just load it
@@ -738,7 +734,7 @@ class Environment:
         if self.cfg.SIM_MODE:
             plt.xlabel("Frequency Bin (Simulated 2.4-2.5 GHz)")
         else:
-            plt.xlabel("Frequency Bin (" + ("2.4-2.5" if liveDataFilename == '../spectrum_245ghz.dat' else "2.59-2.69") + "GHz)")
+            plt.xlabel("Frequency Bin (" + ("2.4-2.5" if liveDataFilename == './Data/spectrum_245ghz.dat' or liveDataFilename == './Data/union_spectrum_245ghz.dat' else "2.59-2.69") + "GHz)")
         plt.ylabel(f"Time Step (1 time step = {timestep} usec)")
         plt.title(f"Spectrum Occupancy Over Time (Last {spectrumSampleSize} time steps)")
         cbar = plt.colorbar(ticks=ticks)
