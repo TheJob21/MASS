@@ -21,3 +21,9 @@ class FixedStartAgent(CognitiveAgent):
         stop = start + length
 
         self.currentAction = (start, stop)
+
+    def save(self, path):
+        pass
+
+    def load(self, path, map_location=None):
+        pass

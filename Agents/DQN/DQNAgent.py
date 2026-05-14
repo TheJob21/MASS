@@ -57,3 +57,65 @@ class DQNAgent(CognitiveAgent):
         self.optimizer.step()
 
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
+
+    def save(self, path):
+
+        checkpoint = {
+            "policy_state_dict": self.policy.state_dict(),
+            "target_state_dict": self.target.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+
+            "epsilon": self.epsilon,
+
+            "epsilon_min": self.epsilon_min,
+            "epsilon_decay": self.epsilon_decay,
+            "gamma": self.gamma,
+
+            "fftSize": self.fftSize,
+            "cpiLen": self.cpiLen,
+        }
+
+        torch.save(checkpoint, path)
+
+
+    def load(self, path, map_location=None):
+
+        checkpoint = torch.load(
+            path,
+            map_location=map_location
+        )
+
+        self.policy.load_state_dict(
+            checkpoint["policy_state_dict"]
+        )
+
+        self.target.load_state_dict(
+            checkpoint["target_state_dict"]
+        )
+
+        self.optimizer.load_state_dict(
+            checkpoint["optimizer_state_dict"]
+        )
+
+        self.epsilon = checkpoint.get(
+            "epsilon",
+            self.epsilon
+        )
+
+        self.epsilon_min = checkpoint.get(
+            "epsilon_min",
+            self.epsilon_min
+        )
+
+        self.epsilon_decay = checkpoint.get(
+            "epsilon_decay",
+            self.epsilon_decay
+        )
+
+        self.gamma = checkpoint.get(
+            "gamma",
+            self.gamma
+        )
+
+        self.policy.to(self.device)
+        self.target.to(self.device)

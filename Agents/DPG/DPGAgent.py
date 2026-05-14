@@ -174,3 +174,122 @@ class DPGAgent(CognitiveAgent):
             target_param.data.copy_(
                 self.tau*param.data + (1-self.tau)*target_param.data
             )
+        
+    def save(self, path):
+
+        checkpoint = {
+
+            # actor
+            "actor_state_dict":
+                self.actor.state_dict(),
+
+            "actor_target_state_dict":
+                self.actor_target.state_dict(),
+
+            "actor_optimizer_state_dict":
+                self.actor_opt.state_dict(),
+
+            # critic
+            "critic_state_dict":
+                self.critic.state_dict(),
+
+            "critic_target_state_dict":
+                self.critic_target.state_dict(),
+
+            "critic_optimizer_state_dict":
+                self.critic_opt.state_dict(),
+
+            # replay buffer
+            "replay_buffer":
+                list(self.buffer.buffer),
+
+            # hyperparameters/state
+            "gamma": self.gamma,
+            "tau": self.tau,
+            "batch_size": self.batch_size,
+            "noise_std": self.noise_std,
+
+            "fftSize": self.fftSize,
+            "max_bw": self.max_bw,
+
+            # RNG states
+            "torch_rng_state":
+                torch.random.get_rng_state(),
+
+            "numpy_rng_state":
+                np.random.get_state(),
+
+            "python_rng_state":
+                random.getstate()
+        }
+
+        torch.save(checkpoint, path)
+    
+    def load(self, path, map_location=None):
+
+        checkpoint = torch.load(
+            path,
+            map_location=map_location,
+            weights_only=False
+        )
+
+        # -----------------------------------
+        # actor
+        # -----------------------------------
+
+        self.actor.load_state_dict(
+            checkpoint["actor_state_dict"]
+        )
+
+        self.actor_target.load_state_dict(
+            checkpoint["actor_target_state_dict"]
+        )
+
+        self.actor_opt.load_state_dict(
+            checkpoint["actor_optimizer_state_dict"]
+        )
+
+        # -----------------------------------
+        # critic
+        # -----------------------------------
+
+        self.critic.load_state_dict(
+            checkpoint["critic_state_dict"]
+        )
+
+        self.critic_target.load_state_dict(
+            checkpoint["critic_target_state_dict"]
+        )
+
+        self.critic_opt.load_state_dict(
+            checkpoint["critic_optimizer_state_dict"]
+        )
+
+        # -----------------------------------
+        # replay buffer
+        # -----------------------------------
+
+        self.buffer.buffer = deque(
+            checkpoint["replay_buffer"],
+            maxlen=self.buffer.buffer.maxlen
+        )
+
+
+        # -----------------------------------
+        # RNG restoration
+        # -----------------------------------
+
+        if "torch_rng_state" in checkpoint:
+            torch.random.set_rng_state(
+                checkpoint["torch_rng_state"]
+            )
+
+        if "numpy_rng_state" in checkpoint:
+            np.random.set_state(
+                checkpoint["numpy_rng_state"]
+            )
+
+        if "python_rng_state" in checkpoint:
+            random.setstate(
+                checkpoint["python_rng_state"]
+            )

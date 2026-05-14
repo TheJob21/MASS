@@ -10,10 +10,16 @@ EVAL_MODE = False
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SEED = 42069
 
-OUTPUT_FILE = "./Output/agent_eval_summarySimMulti.xlsx"
+CHECKPOINT_DIR = "Agents/Checkpoints"
+LOAD_CHECKPOINTS = True
+
+AUTO_SAVE_LATEST = True
+
+
+OUTPUT_FILE = "./Output/agent_eval_summary245Solo.xlsx"
 
 DATA_CHOICE = "245"
-DATA_CHOICE = "u245"
+# DATA_CHOICE = "u245"
 # DATA_CHOICE = "264"
 # DATA_CHOICE = "u264"
 
@@ -59,18 +65,18 @@ HOCAE_PFA = 1e-2
 
 AGENTS = {
     "static": {
-        "fat": 3,
-        "skinny": 4,
-        "pulsed": 5,
+        "fat": 0,
+        "skinny": 0,
+        "pulsed": 0,
         "rectangular": 0
     },
-    "random_start": 0,
-    "saa": 0,
+    "random_start": 1,
+    "saa": 1,
     "ppo": 1,
     "dqn": 1,
     "mfos": 1,
-    "dpg": 0,
-    "ablated_mfos": 0
+    "dpg": 1,
+    "ablated_mfos": 1
 }
 
 # ============================================================
@@ -141,7 +147,7 @@ REWARD["collision_weight"] = (
 # RUNTIME CONTROL
 # ============================================================
 
-ITERATIONS = 1_000_000
+ITERATIONS = 30_000
 SPECTRUM_SAMPLE_SIZE = 30_000
 
 EVAL_SPLIT = 0.8

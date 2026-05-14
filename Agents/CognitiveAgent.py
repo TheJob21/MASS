@@ -1,6 +1,7 @@
 from Agents.Agent import Agent
+from abc import ABC, abstractmethod
 
-class CognitiveAgent(Agent):
+class CognitiveAgent(Agent, ABC):
     def __init__(self, currentAction=None, fftSize=1024, cpiLen=256, iterationsPerPulse=20):
         super().__init__(currentAction=currentAction, fftSize=fftSize)
         self.cpiLen = cpiLen
@@ -51,6 +52,23 @@ class CognitiveAgent(Agent):
         intervalBW = binSize * (self.currentAction[1] - self.currentAction[0]) # MHz
         centerFreq = startingFrequency + ((binSize * self.currentAction[0]) + (intervalBW / 2)) # MHz
         return (centerFreq, intervalBW)
+    
+    @abstractmethod
+    def save(self, path):
+        """
+        Save model/checkpoint to disk.
+        """
+        pass
+
+    @abstractmethod
+    def load(self, path, map_location=None):
+        """
+        Load model/checkpoint from disk.
+        """
+        pass
+
+    def get_name(self):
+        return self.__class__.__name__.lower()
     
     @staticmethod
     def continuous_action_to_interval1(start_action, width_action, fftSize=1024):

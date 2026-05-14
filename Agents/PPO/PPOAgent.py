@@ -158,7 +158,7 @@ class PPOAgent(CognitiveAgent):
         lr=5e-4,
         lr_decay=True,
         lr_decay_steps=2000,
-        lr_min=-1e-5,
+        lr_min=1e-5,
         num_epochs=10,
         entropy_coef=0.001,
         entropy_decay=0.995,
@@ -490,3 +490,110 @@ class PPOAgent(CognitiveAgent):
         self.hiddens.clear()
         self.prevActions.clear()
         self.cpiIndices.clear()
+
+    def save(self, path):
+
+        checkpoint = {
+            "policy_state_dict": self.policy.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+
+            "entropy_coef": self.entropy_coef,
+
+            "torch_rng_state": self.torchRng.get_state(),
+
+            "gamma": self.gamma,
+            "lam": self.lam,
+            "clip_eps": self.clip_eps,
+
+            "fftSize": self.fftSize,
+            "cpiLen": self.cpiLen,
+        }
+
+        if self.scheduler is not None:
+            checkpoint["scheduler_state_dict"] = (
+                self.scheduler.state_dict()
+            )
+
+        torch.save(checkpoint, path)
+
+    def load(self, path, map_location="cpu"):
+
+        checkpoint = torch.load(path, map_location=map_location)
+
+        # ------------------------------------------------
+        # Restore model + optimizer
+        # ------------------------------------------------
+        self.policy.load_state_dict(
+            checkpoint["policy_state_dict"]
+        )
+
+        self.optimizer.load_state_dict(
+            checkpoint["optimizer_state_dict"]
+        )
+
+        # ------------------------------------------------
+        # Restore scheduler if present
+        # ------------------------------------------------
+        if (
+            self.scheduler is not None and
+            "scheduler_state_dict" in checkpoint
+        ):
+            self.scheduler.load_state_dict(
+                checkpoint["scheduler_state_dict"]
+            )
+
+        # ------------------------------------------------
+        # Restore PPO hyperparameters
+        # ------------------------------------------------
+        self.entropy_coef = checkpoint.get(
+            "entropy_coef",
+            self.entropy_coef
+        )
+
+        self.gamma = checkpoint.get(
+            "gamma",
+            self.gamma
+        )
+
+        self.lam = checkpoint.get(
+            "lam",
+            self.lam
+        )
+
+        self.clip_eps = checkpoint.get(
+            "clip_eps",
+            self.clip_eps
+        )
+
+        # ------------------------------------------------
+        # Restore RNG state
+        # ------------------------------------------------
+        if "torch_rng_state" in checkpoint:
+            self.torchRng.set_state(
+                checkpoint["torch_rng_state"]
+            )
+
+        # ------------------------------------------------
+        # Optional sanity checks
+        # ------------------------------------------------
+        saved_fft = checkpoint.get("fftSize", None)
+        saved_cpi = checkpoint.get("cpiLen", None)
+
+        if saved_fft is not None and saved_fft != self.fftSize:
+            print(
+                f"Warning: checkpoint fftSize={saved_fft} "
+                f"but current fftSize={self.fftSize}"
+            )
+
+        if saved_cpi is not None and saved_cpi != self.cpiLen:
+            print(
+                f"Warning: checkpoint cpiLen={saved_cpi} "
+                f"but current cpiLen={self.cpiLen}"
+            )
+
+        # ------------------------------------------------
+        # Put model in eval mode by default
+        # ------------------------------------------------
+        self.policy.eval()
+
+        print(f"Loaded PPO checkpoint from: {path}")

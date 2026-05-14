@@ -375,6 +375,37 @@ class RNN(nn.Module):
             param_group['lr'] = genome["lr"]
         self.reset()
 
+    def get_checkpoint(self):
+        return {
+            "model_state_dict": self.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "genome": copy.deepcopy(self.genome),
+
+            "torch_rng_state": self.torch_rng.get_state(),
+            "seed": self.seed
+        }
+
+    def load_checkpoint(self, checkpoint, map_location=None):
+
+        self.load_state_dict(
+            checkpoint["model_state_dict"]
+        )
+
+        self.optimizer.load_state_dict(
+            checkpoint["optimizer_state_dict"]
+        )
+
+        self.genome = copy.deepcopy(
+            checkpoint["genome"]
+        )
+
+        if "torch_rng_state" in checkpoint:
+            self.torch_rng.set_state(
+                checkpoint["torch_rng_state"]
+            )
+
+        self.seed = checkpoint["seed"]
+
 class MFOSIndividual:
     def __init__(self, genome):
         self.genome = genome
@@ -643,6 +674,91 @@ class MFOSAgent(CognitiveAgent):
         keys = ["lr", "gamma",
                 "exploration_center", "exploration_bw"]
         return np.sqrt(sum((g1[k] - g2[k])**2 for k in keys))
+
+    def save(self, path):
+
+        checkpoint = {
+
+            # policy
+            "policy_checkpoint":
+                self.policy.get_checkpoint(),
+
+            # evolutionary state
+            "population": copy.deepcopy(self.population),
+            "fitness": self.fitness,
+            "current_index": self.current_index,
+
+            "best_ave_reward_ever":
+                self.best_ave_reward_ever,
+
+            "best_individual_ever":
+                copy.deepcopy(self.best_individual_ever),
+
+            # config
+            "population_size": self.population_size,
+            "mutation_scale": self.mutation_scale,
+            "elite_fraction": self.elite_fraction,
+            "fresh_fraction": self.fresh_fraction,
+
+            # RNG
+            "numpy_rng_state":
+                self.np_rng.bit_generator.state,
+        }
+
+        torch.save(checkpoint, path)
+
+    def load(self, path, map_location=None):
+
+        checkpoint = torch.load(
+            path,
+            map_location=map_location,
+            weights_only=False
+        )
+
+        # -----------------------------------
+        # restore evolution state
+        # -----------------------------------
+
+        self.population = checkpoint["population"]
+
+        self.fitness = checkpoint["fitness"]
+
+        self.current_index = checkpoint["current_index"]
+
+        self.best_ave_reward_ever = checkpoint[
+            "best_ave_reward_ever"
+        ]
+
+        self.best_individual_ever = checkpoint[
+            "best_individual_ever"
+        ]
+
+        # -----------------------------------
+        # restore RNG
+        # -----------------------------------
+
+        self.np_rng.bit_generator.state = checkpoint[
+            "numpy_rng_state"
+        ]
+
+        # -----------------------------------
+        # restore current genome
+        # -----------------------------------
+
+        current_genome = self.population[
+            self.current_index
+        ].genome
+
+        self.policy.set_genome(current_genome)
+
+        # -----------------------------------
+        # restore network
+        # -----------------------------------
+
+        self.policy.load_checkpoint(
+            checkpoint["policy_checkpoint"],
+            map_location=map_location
+        )
     
 def random_genome(np_rng):
     g = {}
@@ -690,3 +806,32 @@ class AblatedMFOSAgent(CognitiveAgent):
 
     def update(self):
         self.policy.update()
+
+    def save(self, path):
+
+        checkpoint = {
+            "policy_checkpoint":
+                self.policy.get_checkpoint(),
+
+            "numpy_rng_state":
+                self.np_rng.bit_generator.state
+        }
+
+        torch.save(checkpoint, path)
+
+    def load(self, path, map_location=None):
+
+        checkpoint = torch.load(
+            path,
+            map_location=map_location,
+            weights_only=False
+        )
+
+        self.policy.load_checkpoint(
+            checkpoint["policy_checkpoint"],
+            map_location=map_location
+        )
+
+        self.np_rng.bit_generator.state = checkpoint[
+            "numpy_rng_state"
+        ]

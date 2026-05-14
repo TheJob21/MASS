@@ -2,3 +2,4 @@
 *.dat
 __pycache__
 *.pyc
+*.pt

@@ -20,6 +20,7 @@ from rewards import Rewards
 from signal_processing import SignalProcessor
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
+from Agents.Checkpoints.checkpoint_utils import load_agents, save_agents
 
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
@@ -457,6 +458,9 @@ class Environment:
             ablatedMfosAgentStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
             allCogAgents.append(ablatedMfosAgent)
 
+        if self.cfg.LOAD_CHECKPOINTS:
+            load_agents(allCogAgents, self.cfg.CHECKPOINT_DIR, self.cfg.DEVICE)
+
         lastPulseStates = []
         for agent in allCogAgents:
             lastPulseStates.append(deque(maxlen=iterationsInPulse))
@@ -684,7 +688,10 @@ class Environment:
                             mfosAgent.evolve()
 
         liveData = None
-                            
+
+        if self.cfg.AUTO_SAVE_LATEST:
+            save_agents(allCogAgents, self.cfg.CHECKPOINT_DIR)
+
         # Print Cumulative Rewards
         cumulativeRewardString = "Cumulative Evaluation Reward:"
         for randomStartAgent in range(numRandomStartAgents):
