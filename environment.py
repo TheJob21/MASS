@@ -288,6 +288,193 @@ class Environment:
             if s["agent_type"] == agent_type and s["agent_idx"] == idx:
                 return s.get(key, None)
         return None
+    
+
+    def generate_range_doppler_map(
+        self,
+        agent,
+        target_range_bin=300,
+        target_doppler_bin=20,
+        cpi_start=0,
+        noise_power=0.001
+    ):
+
+        CPI = self.cfg.CPI_LEN
+        FFT_SIZE = self.cfg.FFT_SIZE
+
+        # ---------------------------------------
+        # Collect ONE CPI of agent actions
+        # ---------------------------------------
+        actions = agent.allActions[cpi_start:cpi_start + CPI]
+
+        if len(actions) < CPI:
+            raise ValueError("Not enough actions for one CPI")
+
+        # ---------------------------------------
+        # Build pulse-agile waveforms
+        # ---------------------------------------
+
+        #
+        # waveform_matrix shape:
+        #
+        #   [pulse, frequency_bin]
+        #
+        waveform_matrix = np.zeros((CPI, FFT_SIZE), dtype=np.complex64)
+
+        for m, action in enumerate(actions):
+
+            center_freq, bandwidth = action
+
+            #
+            # Convert MHz back to FFT bins
+            #
+            bw_bins = int(bandwidth / self.cfg.BIN_SIZE)
+
+            center_bin = int(
+                (center_freq - self.cfg.STARTING_FREQUENCY_MAP[
+                    self.cfg.STORED_STATE_MAP[
+                        self.cfg.SPECTRUM_FILES[self.cfg.DATA_CHOICE]
+                    ]
+                ]) / self.cfg.BIN_SIZE
+            )
+
+            start = max(0, center_bin - bw_bins // 2)
+            stop = min(FFT_SIZE, start + bw_bins)
+
+            #
+            # Rectangular spectrum waveform
+            #
+            waveform_matrix[m, start:stop] = 1.0
+
+        # ---------------------------------------
+        # Simulate moving target
+        # ---------------------------------------
+
+        received = np.zeros_like(waveform_matrix)
+
+        # ---------------------------------------
+        # Convert waveforms to time domain
+        # ---------------------------------------
+
+        tx_time = np.fft.ifft(waveform_matrix, axis=1)
+
+        received_time = np.zeros_like(tx_time)
+
+        for m in range(CPI):
+
+            #
+            # Integer sample delay
+            #
+            delayed = np.roll(
+                tx_time[m],
+                target_range_bin
+            )
+
+            #
+            # Doppler phase progression across pulses
+            #
+            doppler_phase = np.exp(
+                1j * 2 * np.pi * target_doppler_bin * m / CPI
+            )
+
+            received_time[m] = doppler_phase * delayed
+
+        # ---------------------------------------
+        # Add noise
+        # ---------------------------------------
+
+        noise = (
+            np.random.randn(*received.shape)
+            + 1j * np.random.randn(*received.shape)
+        ) * np.sqrt(noise_power)
+
+        received += noise
+
+        # ---------------------------------------
+        # Matched filtering
+        # ---------------------------------------
+
+        range_profiles = np.zeros_like(received)
+
+        for m in range(CPI):
+
+            tx = waveform_matrix[m]
+
+            #
+            # Matched filter in frequency domain
+            #
+            mf = np.conj(tx)
+
+            #
+            # Range compression
+            #
+            tx = tx_time[m]
+
+            mf = np.conj(tx[::-1])
+
+            range_profiles[m] = np.convolve(
+                received_time[m],
+                mf,
+                mode='same'
+            )
+
+        # ---------------------------------------
+        # Doppler FFT
+        # ---------------------------------------
+
+        rdm = np.fft.fftshift(
+            np.fft.fft(range_profiles, axis=0),
+            axes=0
+        )
+
+        # ---------------------------------------
+        # Convert to dB
+        # ---------------------------------------
+
+        rdm_db = 20 * np.log10(np.abs(rdm) + 1e-12)
+
+        #
+        # Normalize
+        #
+        rdm_db -= np.max(rdm_db)
+
+        #
+        # Dynamic range clipping
+        #
+        rdm_db = np.clip(rdm_db, -40, 0)
+
+        # ---------------------------------------
+        # Plot
+        # ---------------------------------------
+
+        plt.figure(figsize=(10, 6))
+
+        plt.imshow(
+            rdm_db,
+            aspect='auto',
+            origin='lower',
+            cmap='jet',
+            extent=[
+                0,
+                FFT_SIZE,
+                -CPI // 2,
+                CPI // 2
+            ]
+        )
+
+        plt.xlabel("Range Bin")
+        plt.ylabel("Doppler Bin")
+        plt.title(
+            f"Range-Doppler Map "
+            f"({agent.__class__.__name__})"
+        )
+
+        plt.colorbar(label="Magnitude (dB)")
+
+        plt.tight_layout()
+        plt.show()
+
+        return rdm_db
 
     def run(self):
         currentState = staticState = self.initState() # S
@@ -689,6 +876,14 @@ class Environment:
 
         liveData = None
 
+        for agent in allCogAgents:
+            self.generate_range_doppler_map(
+                agent=agent,
+                target_range_bin=250,
+                target_doppler_bin=15,
+                cpi_start=int(len(agent.allActions)*.8)
+            )
+
         if self.cfg.AUTO_SAVE_LATEST:
             save_agents(allCogAgents, self.cfg.CHECKPOINT_DIR)
 
@@ -1008,7 +1203,6 @@ class Environment:
                 self.cfg.OUTPUT_FILE = f"{base}_{i}{ext}"
                 i += 1
 
-        print(f"\nSaved evaluation summary to {self.cfg.OUTPUT_FILE}")
         print("\n=== Evaluation Summary ===")
         print(df)
 
