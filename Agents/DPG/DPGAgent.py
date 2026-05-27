@@ -107,13 +107,16 @@ class DPGAgent(CognitiveAgent):
         self.critic_opt = optim.Adam(self.critic.parameters(), lr=critic_lr)
 
         self.buffer = ReplayBuffer()
-
+        self.eval_mode = False
+        self.state_t = None
         # simulator compatibility
         self.lastAction = None
 
-    def select_action(self, obs_seq, eval_mode=False):
-
-        state = obs_seq[-1].astype(np.float32)
+    def selectAction(self, state_seq, eval_mode):
+        self.state_t = state_seq[-1].astype(np.float32)
+        
+        obs_seq_np = np.stack(state_seq)
+        state = obs_seq_np[-1].astype(np.float32)
 
         state_t = torch.tensor(state).to(self.device).unsqueeze(0)
 

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 from Agents.Util.NormalWithRNG import NormalWithRNG
 from Agents.CognitiveAgent import CognitiveAgent
 
@@ -226,11 +227,11 @@ class PPOAgent(CognitiveAgent):
     def resetHidden(self):
         self.hidden = None
 
-    def select_action(self, state_seq_np, eval_mode=False):
+    def selectAction(self, state_seq, eval_mode):
         """
         state_seq_np: (samples_per_pulse, 1024)
         """
-
+        state_seq_np = np.stack(state_seq)
         state_tensor = torch.as_tensor(
             state_seq_np,
             dtype=torch.float32,

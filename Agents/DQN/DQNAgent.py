@@ -6,7 +6,7 @@ import numpy as np
 from Agents.CognitiveAgent import CognitiveAgent
 
 class DQNAgent(CognitiveAgent):
-    def __init__(self, actionList, currentAction=None, fftSize=1024, cpiLen=256, device="cpu"):
+    def __init__(self, actionList, currentAction=None, fftSize=1024, rng=None, cpiLen=256, device="cpu", dqnActions=None):
         super().__init__(currentAction, fftSize, cpiLen)
         
         self.actions = actionList
@@ -23,28 +23,41 @@ class DQNAgent(CognitiveAgent):
         self.epsilon_min = 0.05
         self.epsilon_decay = 0.9995
         self.gamma = 0.9
+        self.state_t = None
+        self.action_idx = None
+        self.DQN_ACTIONS=dqnActions
+        self.rng = rng
 
-    def select_action(self, state, rng=None, eval_mode=False):
+    def selectAction(self, state_seq, eval_mode):
+        self.state_t = state_seq[-1].astype(np.float32)
         if eval_mode:
             with torch.no_grad():
-                q = self.policy(torch.tensor(state, dtype=torch.float32).unsqueeze(0))
-                return q.argmax(dim=1).item()
+                q = self.policy(torch.tensor(self.state_t, dtype=torch.float32).unsqueeze(0))
+                self.action_idx = q.argmax(dim=1).item()
+                interval = self.DQN_ACTIONS[self.action_idx]
+                self.currentAction = interval
         
-        if rng == None:
+        if self.rng == None:
             if np.random.rand() < self.epsilon:
-                return np.random.randint(len(self.actions))
-        elif rng.random() < self.epsilon:
-            return rng.integers(len(self.actions))
+                self.action_idx = np.random.randint(len(self.actions))
+                interval = self.DQN_ACTIONS[self.action_idx]
+                self.currentAction = interval
+        elif self.rng.random() < self.epsilon:
+            self.action_idx = self.rng.integers(len(self.actions))
+            interval = self.DQN_ACTIONS[self.action_idx]
+            self.currentAction = interval
 
         with torch.no_grad():
-            q = self.policy(torch.tensor(state).unsqueeze(0))
-            return q.argmax().item()
+            q = self.policy(torch.tensor(self.state_t).unsqueeze(0))
+            self.action_idx = q.argmax().item()
+            interval = self.DQN_ACTIONS[self.action_idx]
+            self.currentAction = interval
 
-    def train_step(self, batch_size=32, rng=None):
+    def train_step(self, batch_size=32):
         if len(self.buffer) < batch_size:
             return
 
-        s, a, r, s2, d = self.buffer.sample(batch_size, rng=rng)
+        s, a, r, s2, d = self.buffer.sample(batch_size, rng=self.rng)
 
         q = self.policy(s).gather(1, a.unsqueeze(1)).squeeze()
         with torch.no_grad():

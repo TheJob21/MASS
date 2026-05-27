@@ -293,8 +293,8 @@ class Environment:
     def generate_range_doppler_map(
         self,
         agent,
-        target_range_bin=300,
-        target_doppler_bin=20,
+        target_range_m=1500,
+        target_velocity_mps=25,
         cpi_start=0,
         noise_power=0.001
     ):
@@ -302,179 +302,141 @@ class Environment:
         CPI = self.cfg.CPI_LEN
         FFT_SIZE = self.cfg.FFT_SIZE
 
-        # ---------------------------------------
-        # Collect ONE CPI of agent actions
-        # ---------------------------------------
+        PW = 10.24e-6
+        PRI = 204.8e-6
+
+        c = 299792458.0
+
+        Fs = FFT_SIZE / PW
+        Ts = 1.0 / Fs
+
+        PRI_samples = int(np.round(PRI * Fs))
+
         actions = agent.allActions[cpi_start:cpi_start + CPI]
 
         if len(actions) < CPI:
-            raise ValueError("Not enough actions for one CPI")
+            raise ValueError("Need one full CPI")
 
-        # ---------------------------------------
-        # Build pulse-agile waveforms
-        # ---------------------------------------
-
-        #
-        # waveform_matrix shape:
-        #
-        #   [pulse, frequency_bin]
-        #
-        waveform_matrix = np.zeros((CPI, FFT_SIZE), dtype=np.complex64)
-
-        for m, action in enumerate(actions):
-
-            center_freq, bandwidth = action
-
-            #
-            # Convert MHz back to FFT bins
-            #
-            bw_bins = int(bandwidth / self.cfg.BIN_SIZE)
-
-            center_bin = int(
-                (center_freq - self.cfg.STARTING_FREQUENCY_MAP[
-                    self.cfg.STORED_STATE_MAP[
-                        self.cfg.SPECTRUM_FILES[self.cfg.DATA_CHOICE]
-                    ]
-                ]) / self.cfg.BIN_SIZE
-            )
-
-            start = max(0, center_bin - bw_bins // 2)
-            stop = min(FFT_SIZE, start + bw_bins)
-
-            #
-            # Rectangular spectrum waveform
-            #
-            waveform_matrix[m, start:stop] = 1.0
-
-        # ---------------------------------------
-        # Simulate moving target
-        # ---------------------------------------
-
-        received = np.zeros_like(waveform_matrix)
-
-        # ---------------------------------------
-        # Convert waveforms to time domain
-        # ---------------------------------------
-
-        tx_time = np.fft.ifft(waveform_matrix, axis=1)
-
-        received_time = np.zeros_like(tx_time)
-
-        for m in range(CPI):
-
-            #
-            # Integer sample delay
-            #
-            delayed = np.roll(
-                tx_time[m],
-                target_range_bin
-            )
-
-            #
-            # Doppler phase progression across pulses
-            #
-            doppler_phase = np.exp(
-                1j * 2 * np.pi * target_doppler_bin * m / CPI
-            )
-
-            received_time[m] = doppler_phase * delayed
-
-        # ---------------------------------------
-        # Add noise
-        # ---------------------------------------
-
-        noise = (
-            np.random.randn(*received.shape)
-            + 1j * np.random.randn(*received.shape)
-        ) * np.sqrt(noise_power)
-
-        received += noise
-
-        # ---------------------------------------
-        # Matched filtering
-        # ---------------------------------------
-
-        range_profiles = np.zeros_like(received)
-
-        for m in range(CPI):
-
-            tx = waveform_matrix[m]
-
-            #
-            # Matched filter in frequency domain
-            #
-            mf = np.conj(tx)
-
-            #
-            # Range compression
-            #
-            tx = tx_time[m]
-
-            mf = np.conj(tx[::-1])
-
-            range_profiles[m] = np.convolve(
-                received_time[m],
-                mf,
-                mode='same'
-            )
-
-        # ---------------------------------------
-        # Doppler FFT
-        # ---------------------------------------
-
-        rdm = np.fft.fftshift(
-            np.fft.fft(range_profiles, axis=0),
-            axes=0
-        )
-
-        # ---------------------------------------
-        # Convert to dB
-        # ---------------------------------------
-
-        rdm_db = 20 * np.log10(np.abs(rdm) + 1e-12)
-
-        #
-        # Normalize
-        #
-        rdm_db -= np.max(rdm_db)
-
-        #
-        # Dynamic range clipping
-        #
-        rdm_db = np.clip(rdm_db, -40, 0)
-
-        # ---------------------------------------
-        # Plot
-        # ---------------------------------------
-
-        plt.figure(figsize=(10, 6))
-
-        plt.imshow(
-            rdm_db,
-            aspect='auto',
-            origin='lower',
-            cmap='jet',
-            extent=[
-                0,
-                FFT_SIZE,
-                -CPI // 2,
-                CPI // 2
+        start_freq = (
+            self.cfg.STARTING_FREQUENCY_MAP[
+                self.cfg.STORED_STATE_MAP[
+                    self.cfg.SPECTRUM_FILES[self.cfg.DATA_CHOICE]
+                ]
             ]
         )
 
-        plt.xlabel("Range Bin")
-        plt.ylabel("Doppler Bin")
-        plt.title(
-            f"Range-Doppler Map "
-            f"({agent.__class__.__name__})"
+        waveform_matrix = np.zeros((CPI, FFT_SIZE), dtype=np.complex64)
+
+        # Build agile spectra
+        for m,(cf,bw) in enumerate(actions):
+
+            bw_bins = max(1, int(np.round(bw / self.cfg.BIN_SIZE)))
+
+            center_bin = int(np.round( (cf-start_freq) / self.cfg.BIN_SIZE ))
+
+            lo = max(0, center_bin-bw_bins // 2)
+
+            hi = min(FFT_SIZE, lo+bw_bins)
+
+            waveform_matrix[m, lo:hi] = 1.0
+
+        # Time-domain pulse
+        tx = np.fft.ifft(waveform_matrix, axis=1)
+
+        fc = np.mean([
+            a[0] * 1e6
+            for a in actions
+        ])
+
+        wavelength = c / fc
+
+        fd = (2 * target_velocity_mps / wavelength)
+
+        delay_sec = (2 * target_range_m / c)
+
+        delay_samples = int(np.round(delay_sec * Fs))
+
+        if delay_samples >= PRI_samples:
+            raise ValueError("Target beyond PRI")
+
+        rx = np.zeros((CPI, PRI_samples), dtype=np.complex64)
+
+        # Build echoes
+        for p in range(CPI):
+
+            phase = np.exp(1j * 2 * np.pi * fd * p * PRI)
+
+            usable = min(FFT_SIZE, PRI_samples - delay_samples)
+
+            rx[p, delay_samples: delay_samples+usable] += (tx[p,:usable] * phase)
+
+        # Noise
+        # noise = (np.random.randn(*rx.shape) + 1j * np.random.randn(*rx.shape))
+
+        # noise *= np.sqrt(noise_power / 2)
+
+        # rx += noise
+
+        # Matched filter
+        range_profiles = np.zeros((CPI, PRI_samples), dtype=np.complex64)
+
+        for p in range(CPI):
+            mf = np.conj(tx[p][::-1])
+
+            range_profiles[p] = np.convolve(rx[p], mf, mode='same')
+
+        # Remove MF centering offset
+        mf_delay = FFT_SIZE // 2
+
+        range_profiles = np.roll(range_profiles, -mf_delay, axis=1)
+
+        # Doppler FFT
+        rdm = np.fft.fftshift(np.fft.fft(range_profiles, axis=0), axes=0)
+
+        mag = np.abs(rdm)
+
+        mag /= (np.max(mag) + 1e-12)
+
+        rdm_db = 20 * np.log10(mag + 1e-12)
+
+        rdm_db = np.clip(rdm_db, -40, 0)
+
+        # Axes
+        range_axis = (np.arange(PRI_samples) * Ts * c / 2)
+
+        doppler_hz = np.fft.fftshift(np.fft.fftfreq(CPI, PRI))
+
+        velocity_axis = (doppler_hz * wavelength / 2)
+
+        plt.figure(figsize=(10,7))
+
+        plt.imshow(
+            rdm_db.T,
+            extent=[
+                velocity_axis[0],
+                velocity_axis[-1],
+                range_axis[0],
+                range_axis[-1]
+            ],
+            aspect='auto',
+            origin='lower',
+            cmap='jet'
         )
 
-        plt.colorbar(label="Magnitude (dB)")
+        plt.xlabel("Velocity (m/s)")
+
+        plt.ylabel("Range (m)")
+
+        plt.colorbar(label="dB")
+
+        plt.title(f"{agent.__class__.__name__}")
+
+        plt.xlim(-20, 20)      # velocity axis (m/s)
+        plt.ylim(900, 1100)   # range axis (m)
 
         plt.tight_layout()
-        plt.show()
 
-        return rdm_db
+        plt.show()
 
     def run(self):
         currentState = staticState = self.initState() # S
@@ -530,6 +492,7 @@ class Environment:
         iterationsInPulse = int(self.cfg.PRI / timestep)
 
         allCogAgents = []
+        allCogAgentsStartIndices = []
 
         # Static Agents For Simulating Environment
         staticAgents = []
@@ -550,29 +513,27 @@ class Environment:
         # Random Single Action Agent
         numRandomStartAgents = self.cfg.AGENTS['random_start']
         randomStartAgents = []
-        randomStartAgentStartIndices = []
         for randAgent in range(numRandomStartAgents):
             randomStartAgents.append(FixedStartAgent(rng=randomStartAgentRNG))
             randomStartAgents[randAgent].storeAction(randomStartAgents[randAgent].curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency))
-            randomStartAgentStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+            allCogAgentsStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
             allCogAgents.append(randomStartAgents[randAgent])
             
         # SAA Agent Parameters
         numSaaAgents = self.cfg.AGENTS['saa'] # Sense-And-Avoid
         saaAgents = []
-        saaAgentStartIndices = []
         for saaAgent in range(numSaaAgents):
             saaAgents.append(SAAAgent())
-            saaAgentStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+
+            allCogAgentsStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
             allCogAgents.append(saaAgents[saaAgent])
             
         # PPO Agent Parameters
         numPpoAgents = self.cfg.AGENTS['ppo'] # Proximal Policy Optimization
         ppoAgents = []
-        ppoAgentStartIndices = []
         for ppoAgent in range(numPpoAgents):
             ppoAgents.append(PPOAgent(fftSize=self.cfg.FFT_SIZE, cpiLen=self.cfg.CPI_LEN, device=self.cfg.DEVICE, seed=ppoSeed+ppoAgent))
-            ppoAgentStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+            allCogAgentsStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
             allCogAgents.append(ppoAgents[ppoAgent])
 
         # DQN Agent Parameters
@@ -587,16 +548,14 @@ class Environment:
                     DQN_ACTIONS.append((start, stop))
         numDqnAgents = self.cfg.AGENTS['dqn']
         dqnAgents = []
-        dqnAgentStartIndices = []
         for dqnAgent in range(numDqnAgents):
-            dqnAgents.append(DQNAgent(fftSize=self.cfg.FFT_SIZE, actionList=DQN_ACTIONS, cpiLen=self.cfg.CPI_LEN, device=self.cfg.DEVICE))
-            dqnAgentStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+            dqnAgents.append(DQNAgent(fftSize=self.cfg.FFT_SIZE, actionList=DQN_ACTIONS, rng=dqnAgentRNG, cpiLen=self.cfg.CPI_LEN, device=self.cfg.DEVICE, dqnActions=DQN_ACTIONS))
+            allCogAgentsStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
             allCogAgents.append(dqnAgents[dqnAgent])
 
         # M-FOS Agent Initialization
         numMfosAgents = self.cfg.AGENTS['mfos']
         mfosAgents = []
-        mfosAgentStartIndices = []
         for mfosAgentI in range(numMfosAgents):
             # base_genome = {
             #     "lr": 1.4e-5,
@@ -618,22 +577,20 @@ class Environment:
                 cpiLen=self.cfg.CPI_LEN
             )
             mfosAgents.append(mfosAgent)
-            mfosAgentStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+            allCogAgentsStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
             allCogAgents.append(mfosAgent)
 
         # DPG Agent Initialization
         numDpgAgents = self.cfg.AGENTS['dpg']
         dpgAgents = []
-        dpgAgentStartIndices = []
         for i in range(numDpgAgents):
             dpgAgents.append(DPGAgent(fftSize=self.cfg.FFT_SIZE, device=self.cfg.DEVICE))
-            dpgAgentStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+            allCogAgentsStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
             allCogAgents.append(dpgAgents[i])
 
         # Ablated M-FOS Agent Initialization
         numAblatedMfosAgents = self.cfg.AGENTS['ablated_mfos']
         ablatedMFOSAgents = []
-        ablatedMfosAgentStartIndices = []
         for mfosAgentI in range(numAblatedMfosAgents):
             ablatedMfosAgent = AblatedMFOSAgent(
                 fftSize=self.cfg.FFT_SIZE,
@@ -642,7 +599,7 @@ class Environment:
                 seed=self.cfg.SEED + mfosAgentI + 1 #42075 is good for random genomes and weights?
             )
             ablatedMFOSAgents.append(ablatedMfosAgent)
-            ablatedMfosAgentStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+            allCogAgentsStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
             allCogAgents.append(ablatedMfosAgent)
 
         if self.cfg.LOAD_CHECKPOINTS:
@@ -657,7 +614,7 @@ class Environment:
 
         # main loop
         for i in range(iterations): # 1 = 12.8 microseconds
-            if not self.cfg.EVAL_MODE and i == int(iterations * .8):
+            if not self.cfg.EVAL_MODE and i == int(iterations * self.cfg.EVAL_SPLIT):
                 self.cfg.EVAL_MODE = True
                 for ppoAgent in ppoAgents:
                     ppoAgent.policy.eval()
@@ -680,87 +637,17 @@ class Environment:
                         if idx != idx2 and agent2.isTransmitting:
                             prevStateWithoutAgent = self.updateStateInterval(prevStateWithoutAgent, agent2.currentAction)
                 lastPulseStates[idx].append(prevStateWithoutAgent)
-                
-            # Generate actions for SAA agents
-            for saaAgentI in range(numSaaAgents):
-                if i % iterationsInPulse == saaAgentStartIndices[saaAgentI]:
-                    saaAgent = saaAgents[saaAgentI]
-                    interval = self.getLargestDeadSpaceInterval(lastPulseStates[saaAgentI+numRandomStartAgents][-1])
-                    saaAgent.currentAction = interval
-                    action = saaAgent.curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency)
-                    saaAgent.storeAction(action)
-                elif i % iterationsInPulse == ((saaAgentStartIndices[saaAgentI]+1) % iterationsInPulse): # Pulse lasts one iteration, then listens for PRI duration
-                    saaAgents[saaAgentI].isTransmitting = False
-                
-            # Generate actions for Random Start agents  
-            for randomStartAgentI in range(numRandomStartAgents):
-                if i % iterationsInPulse == randomStartAgentStartIndices[randomStartAgentI]: # every 204.8 usec
-                    randomStartAgents[randomStartAgentI].storeAction(randomStartAgents[randomStartAgentI].curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency))
-                elif i % iterationsInPulse == ((randomStartAgentStartIndices[randomStartAgentI]+1) % iterationsInPulse): # Pulse lasts one iteration, then listens for PRI duration
-                    randomStartAgents[randomStartAgentI].isTransmitting = False
 
-            # Generate actions for PPO agents
-            for ppoAgentI in range(numPpoAgents):
-                if i % iterationsInPulse == ppoAgentStartIndices[ppoAgentI]: # every 204.8 usec
-                    agentStates = lastPulseStates[ppoAgentI + numRandomStartAgents + numSaaAgents]
+            # Generate actions for agents
+            for agentI, agent in enumerate(allCogAgents):
+                if i % iterationsInPulse == allCogAgentsStartIndices[agentI]: # every 204.8 usec
+                    agentStates = lastPulseStates[agentI]
                     if len(agentStates) == iterationsInPulse:
-                        ppoAgent = ppoAgents[ppoAgentI]
-                        obs_seq = np.stack(agentStates)
-                        ppoAgent.select_action(obs_seq, eval_mode=self.cfg.EVAL_MODE)
-                        ppoAgent.storeAction(ppoAgent.curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency))
-                elif i % iterationsInPulse == ((ppoAgentStartIndices[ppoAgentI]+1) % iterationsInPulse): # Pulse lasts one iteration, then listens for PRI duration
-                    ppoAgents[ppoAgentI].isTransmitting = False
+                        agent.selectAction(state_seq=agentStates, eval_mode=self.cfg.EVAL_MODE)
+                        agent.storeAction(agent.curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency))
+                elif i % iterationsInPulse == ((allCogAgentsStartIndices[agentI]+1) % iterationsInPulse): # Pulse lasts one iteration, then listens for PRI duration
+                    allCogAgents[agentI].isTransmitting = False         
 
-                    
-            # Generate actions for DQN agents
-            for dqnAgentI in range(numDqnAgents):
-                if i % iterationsInPulse == dqnAgentStartIndices[dqnAgentI]:
-                    state_t = lastPulseStates[dqnAgentI + numRandomStartAgents + numSaaAgents + numPpoAgents][-1].astype(np.float32)
-                    dqnAgent = dqnAgents[dqnAgentI]
-                    action_idx = dqnAgent.select_action(state_t, rng=dqnAgentRNG, eval_mode=self.cfg.EVAL_MODE)
-                    interval = DQN_ACTIONS[action_idx]
-                    dqnAgent.currentAction = interval
-                    action = dqnAgent.curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency)
-                    dqnAgent.storeAction(action)
-                elif i % iterationsInPulse == ((dqnAgentStartIndices[dqnAgentI]+1) % iterationsInPulse):
-                    dqnAgents[dqnAgentI].isTransmitting = False
-
-            # M-FOS agent action selection   
-            for mfosAgentI in range(numMfosAgents):      
-                if i % iterationsInPulse == mfosAgentStartIndices[mfosAgentI]:
-                    mfosAgent = mfosAgents[mfosAgentI]
-                    agentStates = lastPulseStates[mfosAgentI + numRandomStartAgents + numSaaAgents + numPpoAgents + numDqnAgents]
-                    if len(agentStates) == iterationsInPulse:
-                        obs_seq = np.stack(agentStates)
-                        mfosAgent.select_action(obs_seq)
-                        mfosAgent.storeAction(mfosAgent.curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency))
-                elif i % iterationsInPulse == ((mfosAgentStartIndices[mfosAgentI]+1) % iterationsInPulse):
-                    mfosAgents[mfosAgentI].isTransmitting = False
-
-            # DPG Agent action selection
-            for dpgAgentI in range(numDpgAgents):
-                if i % iterationsInPulse == dpgAgentStartIndices[dpgAgentI]:
-                    agentStates = lastPulseStates[dpgAgentI + numRandomStartAgents + numSaaAgents + numPpoAgents + numDqnAgents + numMfosAgents]
-                    if len(agentStates) == iterationsInPulse:
-                        state_dpg = agentStates[-1].astype(np.float32)
-                        dpgAgent = dpgAgents[dpgAgentI]
-                        obs_seq = np.stack(agentStates)
-                        dpgAgent.select_action(obs_seq, eval_mode=self.cfg.EVAL_MODE)
-                        dpgAgent.storeAction(dpgAgent.curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency))
-                elif i % iterationsInPulse == ((dpgAgentStartIndices[dpgAgentI]+1) % iterationsInPulse):
-                    dpgAgents[dpgAgentI].isTransmitting = False
-
-            # Ablated M-FOS agent action selection   
-            for ablatedMfosAgentI in range(numAblatedMfosAgents):      
-                if i % iterationsInPulse == ablatedMfosAgentStartIndices[mfosAgentI]:
-                    ablatedMfosAgent = ablatedMFOSAgents[ablatedMfosAgentI]
-                    agentStates = lastPulseStates[ablatedMfosAgentI + numRandomStartAgents + numSaaAgents + numPpoAgents + numDqnAgents + numMfosAgents + numDpgAgents]
-                    if len(agentStates) == iterationsInPulse:
-                        obs_seq = np.stack(agentStates)
-                        ablatedMfosAgent.select_action(obs_seq)
-                        ablatedMfosAgent.storeAction(ablatedMfosAgent.curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency))
-                elif i % iterationsInPulse == ((ablatedMfosAgentStartIndices[ablatedMfosAgentI]+1) % iterationsInPulse):
-                    ablatedMFOSAgents[ablatedMfosAgentI].isTransmitting = False
                     
             # Static Agent Actions. Simulate frequency changes
             currentState = self.initState()
@@ -825,13 +712,13 @@ class Environment:
                 for dqnAgent in dqnAgents:
                     if len(dqnAgent.allRewards) > 0 and len(dqnAgent.pulseRewards) == 0:
                         dqnAgent.buffer.push(
-                            state_t,
-                            action_idx,
+                            dqnAgent.state_t,
+                            dqnAgent.action_idx,
                             dqnAgent.allRewards[-1],
                             currentState.astype(np.float32),
                             False
                         )
-                        dqnAgent.train_step(rng=dqnAgentRNG)
+                        dqnAgent.train_step()
                 # Update M-FOS Agents  
                 for mfosAgent in mfosAgents:
                     if len(mfosAgent.allRewards) > 0 and len(mfosAgent.pulseRewards) == 0:
@@ -842,7 +729,7 @@ class Environment:
                 for dpgAgent in dpgAgents:
                     if len(dpgAgent.allRewards) > 0 and len(dpgAgent.pulseRewards) == 0:
                         dpgAgent.buffer.push(
-                            state_dpg,
+                            dpgAgent.state_t,
                             dpgAgent.lastAction,
                             dpgAgent.allRewards[-1],
                             currentState.astype(np.float32),
@@ -879,9 +766,9 @@ class Environment:
         for agent in allCogAgents:
             self.generate_range_doppler_map(
                 agent=agent,
-                target_range_bin=250,
-                target_doppler_bin=15,
-                cpi_start=int(len(agent.allActions)*.8)
+                target_range_m=1040,
+                target_velocity_mps=10,
+                cpi_start=int(len(agent.allActions)*self.cfg.EVAL_SPLIT)
             )
 
         if self.cfg.AUTO_SAVE_LATEST:
@@ -890,19 +777,19 @@ class Environment:
         # Print Cumulative Rewards
         cumulativeRewardString = "Cumulative Evaluation Reward:"
         for randomStartAgent in range(numRandomStartAgents):
-            print("Random Start Agent", randomStartAgent+1 if randomStartAgent > 0 else "", cumulativeRewardString, sum(randomStartAgents[randomStartAgent].allRewards[int(len(randomStartAgents[randomStartAgent].allRewards)*.8):]))
+            print("Random Start Agent", randomStartAgent+1 if randomStartAgent > 0 else "", cumulativeRewardString, sum(randomStartAgents[randomStartAgent].allRewards[int(len(randomStartAgents[randomStartAgent].allRewards)*self.cfg.EVAL_SPLIT):]))
         for saaAgent in range(numSaaAgents):
-            print("SAA Agent", saaAgent+1 if saaAgent > 0 else "", cumulativeRewardString, sum(saaAgents[saaAgent].allRewards[int(len(saaAgents[saaAgent].allRewards)*.8):]))
+            print("SAA Agent", saaAgent+1 if saaAgent > 0 else "", cumulativeRewardString, sum(saaAgents[saaAgent].allRewards[int(len(saaAgents[saaAgent].allRewards)*self.cfg.EVAL_SPLIT):]))
         for ppoAgent in range(numPpoAgents):
-            print("PPO Agent", ppoAgent+1 if ppoAgent > 0 else "", cumulativeRewardString, sum(ppoAgents[ppoAgent].allRewards[int(len(ppoAgents[ppoAgent].allRewards)*.8):]))
+            print("PPO Agent", ppoAgent+1 if ppoAgent > 0 else "", cumulativeRewardString, sum(ppoAgents[ppoAgent].allRewards[int(len(ppoAgents[ppoAgent].allRewards)*self.cfg.EVAL_SPLIT):]))
         for dqnAgent in range(numDqnAgents):
-            print("DQN Agent", dqnAgent+1 if dqnAgent > 0 else "", cumulativeRewardString, sum(dqnAgents[dqnAgent].allRewards[int(len(dqnAgents[dqnAgent].allRewards)*.8):]))
+            print("DQN Agent", dqnAgent+1 if dqnAgent > 0 else "", cumulativeRewardString, sum(dqnAgents[dqnAgent].allRewards[int(len(dqnAgents[dqnAgent].allRewards)*self.cfg.EVAL_SPLIT):]))
         for mfosAgent in range(numMfosAgents):
-            print("M-FOS Agent", mfosAgent+1 if mfosAgent > 0 else "", cumulativeRewardString, sum(mfosAgents[mfosAgent].allRewards[int(len(mfosAgents[mfosAgent].allRewards)*.8):]))
+            print("M-FOS Agent", mfosAgent+1 if mfosAgent > 0 else "", cumulativeRewardString, sum(mfosAgents[mfosAgent].allRewards[int(len(mfosAgents[mfosAgent].allRewards)*self.cfg.EVAL_SPLIT):]))
         for dpgAgent in range(numDpgAgents):
-            print("DPG Agent", dpgAgent+1 if dpgAgent > 0 else "", cumulativeRewardString, sum(dpgAgents[dpgAgent].allRewards[int(len(dpgAgents[dpgAgent].allRewards)*.8):]))
+            print("DPG Agent", dpgAgent+1 if dpgAgent > 0 else "", cumulativeRewardString, sum(dpgAgents[dpgAgent].allRewards[int(len(dpgAgents[dpgAgent].allRewards)*self.cfg.EVAL_SPLIT):]))
         for ablatedMFOSAgent in range(numAblatedMfosAgents):
-            print("Ablated M-FOS Agent", ablatedMFOSAgent+1 if ablatedMFOSAgent > 0 else "", cumulativeRewardString, sum(ablatedMFOSAgents[ablatedMFOSAgent].allRewards[int(len(ablatedMFOSAgents[ablatedMFOSAgent].allRewards)*.8):]))
+            print("Ablated M-FOS Agent", ablatedMFOSAgent+1 if ablatedMFOSAgent > 0 else "", cumulativeRewardString, sum(ablatedMFOSAgents[ablatedMFOSAgent].allRewards[int(len(ablatedMFOSAgents[ablatedMFOSAgent].allRewards)*self.cfg.EVAL_SPLIT):]))
                 
 
         # Spectrum Usage and collisions per agent over time 
@@ -995,7 +882,7 @@ class Environment:
                 plt.plot(x, mean, label=f"{label_prefix} {idx+1}")
                 plt.fill_between(x, mean - std, mean + std, alpha=0.25)
                 # Collect last 20% stats
-                last_idx = int(len(allRewards) * 0.8)
+                last_idx = int(len(allRewards) * self.cfg.EVAL_SPLIT)
                 reward_summary.append({
                     "agent_type": agent_type,
                     "agent_idx": idx,
@@ -1031,7 +918,7 @@ class Environment:
                 plt.fill_between(x, mean - std, mean + std, alpha=0.25)
                 # Last 20% bandwidth
                 bandwidth = allActionsArr[:, 1]
-                start = int(len(bandwidth) * 0.8)
+                start = int(len(bandwidth) * self.cfg.EVAL_SPLIT)
                 last_slice = bandwidth[start:]
 
                 bw_summary.append({
@@ -1068,7 +955,7 @@ class Environment:
                 x, mean, std = self.mean_std_every_n(allCollisionsArr, block)
                 plt.plot(x, mean, label=f"{label_prefix} {idx+1}")
                 plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-                last_idx = int(len(allCollisionsArr) * 0.8)
+                last_idx = int(len(allCollisionsArr) * self.cfg.EVAL_SPLIT)
                 coll_summary.append({
                     "agent_type": agent_type,
                     "agent_idx": idx,
@@ -1102,7 +989,7 @@ class Environment:
                 x, mean, std = self.mean_std_every_n(diffs, block)
                 plt.plot(x, mean, label=f"{label_prefix} {idx+1}")
                 plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-                last_idx = int(len(mean) * 0.8)
+                last_idx = int(len(mean) * self.cfg.EVAL_SPLIT)
                 delta_bw_summary.append({
                     "agent_type": agent_type,
                     "agent_idx": idx,
@@ -1136,7 +1023,7 @@ class Environment:
                 x, mean, std = self.mean_std_every_n(diffs, block)
                 plt.plot(x, mean, label=f"{label_prefix} {idx+1}")
                 plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-                last_idx = int(len(mean) * 0.8)
+                last_idx = int(len(mean) * self.cfg.EVAL_SPLIT)
                 delta_cf_summary.append({
                     "agent_type": agent_type,
                     "agent_idx": idx,

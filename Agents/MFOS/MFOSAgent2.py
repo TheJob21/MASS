@@ -160,7 +160,6 @@ class RNN(nn.Module):
     # Select action
     # --------------------------------------------------------
     def select_action(self, state_seq_np, normalizedCpiIndex, eval=False):
-
         state_tensor = torch.as_tensor(
             state_seq_np,
             dtype=torch.float32,
@@ -479,7 +478,9 @@ class MFOSAgent(CognitiveAgent):
     def current_individual(self):
         return self.population[self.current_index]
     
-    def select_action(self, state_seq_np):
+    def selectAction(self, state_seq, eval_mode):
+        
+        state_seq_np = np.stack(state_seq)
         self.currentAction = self.policy.select_action(
             state_seq_np, 
             self.cpiIndex / self.cpiLen, 
@@ -794,7 +795,8 @@ class AblatedMFOSAgent(CognitiveAgent):
     def set_eval_mode(self):
         self.eval_mode = True
     
-    def select_action(self, state_seq_np):
+    def selectAction(self, state_seq, eval_mode):
+        state_seq_np = np.stack(state_seq)
         self.currentAction = self.policy.select_action(
             state_seq_np, 
             self.cpiIndex / self.cpiLen, 

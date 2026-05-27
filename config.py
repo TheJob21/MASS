@@ -3,7 +3,7 @@ import torch
 # GENERAL EXECUTION SETTINGS
 # ============================================================
 
-SIM_MODE = True          # True = synthetic, False = live spectrum
+SIM_MODE = False          # True = synthetic, False = live spectrum
 MULTI_AGENT = True
 EVAL_MODE = False
 
@@ -11,12 +11,12 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SEED = 42069
 
 CHECKPOINT_DIR = "Agents/Checkpoints"
-LOAD_CHECKPOINTS = True
+LOAD_CHECKPOINTS = False
 
-AUTO_SAVE_LATEST = True
+AUTO_SAVE_LATEST = False
 
 
-OUTPUT_FILE = "./Output/agent_eval_summary245Solo.xlsx"
+OUTPUT_FILE = "./Output/agent_eval_summary.xlsx"
 
 DATA_CHOICE = "245"
 # DATA_CHOICE = "u245"
@@ -70,12 +70,12 @@ AGENTS = {
         "pulsed": 0,
         "rectangular": 0
     },
-    "random_start": 1,
+    "random_start": 0,
     "saa": 1,
     "ppo": 1,
     "dqn": 1,
     "mfos": 1,
-    "dpg": 1,
+    "dpg": 0,
     "ablated_mfos": 1
 }
 
@@ -147,7 +147,7 @@ REWARD["collision_weight"] = (
 # RUNTIME CONTROL
 # ============================================================
 
-ITERATIONS = 30_000
+ITERATIONS = 300_000
 SPECTRUM_SAMPLE_SIZE = 30_000
 
 EVAL_SPLIT = 0.8
