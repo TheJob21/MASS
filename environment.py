@@ -9,12 +9,11 @@ from Agents.Control.StaticAgent import StaticAgent
 from Agents.Control.StaticAgent import StaticType
 from Agents.Control.SAAAgent import SAAAgent
 from Agents.PPO.PPOAgent import PPOAgent
-#from BetaPPOAgent import PPOAgent
 from Agents.DQN.DQNAgent import DQNAgent
 from Agents.DPG.DPGAgent import DPGAgent
 from Agents.Control.RandomStartAgent import FixedStartAgent
-from Agents.MFOS.MFOSAgent2 import AblatedMFOSAgent
-from Agents.MFOS.MFOSAgent2 import MFOSAgent
+from Agents.MFOS.MFOSAgent import AblatedMFOSAgent
+from Agents.MFOS.MFOSAgent import MFOSAgent
 from collections import deque
 from rewards import Rewards
 from signal_processing import SignalProcessor
@@ -77,27 +76,19 @@ class Environment:
         binOwnership
     ):
         fftSize = self.cfg.FFT_SIZE
-        # -------------------------------
         # State is just ownership
-        # -------------------------------
         state = binOwnership.copy()
 
-        # -------------------------------
         # Alpha mask (visibility)
-        # -------------------------------
         alpha_mask = np.zeros(fftSize, dtype=float)
 
         # Static always visible
         alpha_mask[staticState] = 1.0
 
-        # -------------------------------
         # Collision mask
-        # -------------------------------
         collision_mask = np.zeros(fftSize, dtype=bool)
 
-        # -------------------------------
         # Process agents
-        # -------------------------------
         for idx, agent in enumerate(listOfAgents):
 
             if agent.currentAction is None:
@@ -131,9 +122,7 @@ class Environment:
                 listen_mask = (alpha_mask[s:e] < 1.0)
                 alpha_mask[s:e][listen_mask] = 0.3
 
-        # -------------------------------
         # Collision override
-        # -------------------------------
         collision_label = len(listOfAgents) + 2
 
         state[collision_mask] = collision_label
@@ -185,26 +174,16 @@ class Environment:
         cognitiveAgents : list
             Each agent must have:
                 - currentAction: (start, stop) or None
-
-        Returns
-        -------
-        None
         """
 
-        # -------------------------------
         # Step 0: copy previous ownership
-        # -------------------------------
         prevOwnership = binOwnership.copy()
 
-        # -------------------------------
         # Step 1: reset to static baseline
-        # -------------------------------
         binOwnership[:] = 0
         binOwnership[staticState] = 1  # static always wins
 
-        # -------------------------------
         # Step 2: build claim map
-        # -------------------------------
         fftSize = self.cfg.FFT_SIZE
         claim_counts = np.zeros(fftSize, dtype=np.int32)
         claimants = [[] for _ in range(fftSize)]
@@ -230,9 +209,7 @@ class Environment:
                 if agent.isTransmitting:
                     transmitters[i].append(agent_id)  # NEW
 
-        # -------------------------------
         # Step 3: resolve ownership
-        # -------------------------------
         for i in range(fftSize):
 
             # Static always dominates
@@ -245,15 +222,11 @@ class Environment:
             elif claim_counts[i] > 1:
                 prev_owner = prevOwnership[i]
 
-                # ----------------------------------
                 # Case 1: previous owner keeps it
-                # ----------------------------------
                 if prev_owner >= 2 and prev_owner in claimants[i]:
                     binOwnership[i] = prev_owner
 
-                # ----------------------------------
                 # Case 2: no previous owner → NEW RULE
-                # ----------------------------------
                 elif prev_owner == 0:
                     tx_list = transmitters[i]
 
@@ -264,13 +237,9 @@ class Environment:
                         # 0 or multiple transmitters → no owner
                         binOwnership[i] = 0
 
-                # ----------------------------------
                 # Case 3: previous owner lost claim
-                # ----------------------------------
                 else:
                     binOwnership[i] = 0
-
-        # else: remains 0
 
 
     def mean_std_every_n(self, rewards, n=4096):
@@ -849,16 +818,6 @@ class Environment:
 
         cbar.ax.set_yticklabels(tickLabels)
         plt.tight_layout()
-
-        # Plot total spectrum occupancy over time
-        # x, mean, std = mean_std_every_n(occupiedBwPerIteration, n=4096)
-        # plt.figure(figsize=(12, 6))
-        # plt.plot(x, mean, label=f"Average Total Spectrum Occupancy")
-        # plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-        # plt.xlabel("Time step")
-        # plt.ylabel("Occupied Bandwidth (MHz)")
-        # plt.title("Total Occupied Bandwidth Over Time")
-        # plt.grid(True)
 
         # Initialize summary containers
         reward_summary, bw_summary, coll_summary, delta_bw_summary, delta_cf_summary = [], [], [], [], []

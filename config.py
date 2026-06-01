@@ -1,8 +1,6 @@
 import torch
-# ============================================================
-# GENERAL EXECUTION SETTINGS
-# ============================================================
 
+# GENERAL EXECUTION SETTINGS
 SIM_MODE = False          # True = synthetic, False = live spectrum
 MULTI_AGENT = True
 EVAL_MODE = False
@@ -37,10 +35,7 @@ STORED_STATE_MAP = {
     "./Data/union_spectrum_264ghz.dat": "./Data/union_spectrum_264ghz.npz"
 }
 
-# ============================================================
 # SPECTRUM / SIGNAL PROCESSING
-# ============================================================
-
 FFT_SIZE = 1024
 CHANNEL_BANDWIDTH = 100  # MHz
 BIN_SIZE = CHANNEL_BANDWIDTH / FFT_SIZE
@@ -59,10 +54,7 @@ HOCAE_WINDOW_SIZE = 32
 HOCAE_ORDER_SELECTION = 5
 HOCAE_PFA = 1e-2
 
-# ============================================================
 # AGENT COUNTS
-# ============================================================
-
 AGENTS = {
     "static": {
         "fat": 0,
@@ -79,10 +71,7 @@ AGENTS = {
     "ablated_mfos": 1
 }
 
-# ============================================================
 # PPO
-# ============================================================
-
 PPO = {
     "time_horizon": 1024,
     "num_actors": 16,
@@ -93,10 +82,7 @@ PPO = {
     "lr": 2.5e-4
 }
 
-# ============================================================
 # DQN
-# ============================================================
-
 DQN = {
     "memory_size": 2000,
     "batch_size": 32,
@@ -106,10 +92,7 @@ DQN = {
     "hidden_layers": [256, 128, 84]
 }
 
-# ============================================================
 # MFOS
-# ============================================================
-
 MFOS = {
     "population_size": 5,
     "mutation_scale": 0.05,
@@ -117,9 +100,8 @@ MFOS = {
     "fresh_fraction": 0.2
 }
 
-# ============================================================
 # REWARD FUNCTION PARAMETERS
-# ============================================================
+
 # collisionTransmissionTolRatio = 0.0125 # for pulsed aversions
 # collisionTransmissionTolRatio = 0.33 # for constant aversions Use worst reward for pulses, not effective in 2.4-2.5GHz live data
 # collisionTransmissionTolRatio = 0.08 # effective in 2.4-2.5GHz live data,  Use worst reward for pulses
@@ -129,6 +111,7 @@ MFOS = {
 # collisionWeight = 29
 # collisionTransmissionTolRatio = .0275
 # collisionTransmissionTolRatio = 0.033
+
 REWARD = {
     "collision_ratio": 0.033,
     "beta": 0.75,
@@ -143,10 +126,7 @@ REWARD["collision_weight"] = (
     REWARD["transmission_weight"] / REWARD["collision_ratio"]
 )
 
-# ============================================================
 # RUNTIME CONTROL
-# ============================================================
-
 ITERATIONS = 300_000
 SPECTRUM_SAMPLE_SIZE = 30_000
 

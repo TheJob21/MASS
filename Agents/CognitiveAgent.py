@@ -15,6 +15,10 @@ class CognitiveAgent(Agent, ABC):
         self.isTransmitting = False
         self.cpiIndex = 0
 
+    @abstractmethod
+    def selectAction(self, state_seq, eval_mode):
+        pass
+
     def storeReward(self, reward):
         self.pulseRewards.append(reward)
         if len(self.pulseRewards) == self.iterationsPerPulse:
@@ -70,27 +74,7 @@ class CognitiveAgent(Agent, ABC):
     def get_name(self):
         return self.__class__.__name__.lower()
     
-    @staticmethod
-    def continuous_action_to_interval1(start_action, width_action, fftSize=1024):
-        """
-        start_action ∈ [-1, 1] → start bin in [0, fftSize]
-        width_action ∈ [-1, 1] → bandwidth in [0, fftSize - start]
-        No overflow possible, smooth everywhere.
-        """
-        start_bin = int(round((start_action + 1) / 2 * fftSize))
-        start_bin = max(0, min(fftSize, start_bin))
-
-        width_bins = int(round((width_action + 1) / 2 * (fftSize - start_bin)))
-        width_bins = max(width_bins, 102)
-        
-        stop_bin = start_bin + width_bins
-        stop_bin = max(0, min(fftSize, stop_bin))
-
-        return start_bin, stop_bin
-
-    # ============================================================
     # Utility: Continuous → Interval
-    # ============================================================
     @staticmethod   
     def continuous_action_to_interval(center, bandwidth, fftSize=1024):
         """
