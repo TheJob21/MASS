@@ -153,15 +153,17 @@ class PPOAgent(CognitiveAgent):
         cpiLen=256,
         policy: RecurrentSpectrumPPO=None,
         device="cpu",
-        gamma=0.95,
-        lam=0.95,
-        clip_eps=0.2,
-        lr=5e-4,
+        gamma=0.9617,
+        lam=0.9166,
+        clip_eps=0.28,
+        lr=1.25e-4,
         lr_decay=True,
         lr_decay_steps=2000,
         lr_min=1e-5,
+        batch_size=16,
+        bptt_chunk = 32,
         num_epochs=10,
-        entropy_coef=0.001,
+        entropy_coef=0.02978,
         entropy_decay=0.995,
         entropy_min=0.002,
         horizon=1024,
@@ -216,8 +218,8 @@ class PPOAgent(CognitiveAgent):
         self.dones = []
         self.hidden = None
         self.hiddens = []
-        self.batch_size = 16
-        self.bptt_chunk = 32   # truncated BPTT length
+        self.batch_size = batch_size
+        self.bptt_chunk = bptt_chunk   # truncated BPTT length
         self.ret_rms_mean = 0.0
         self.ret_rms_var  = 1.0
         self.ret_rms_count = 0
@@ -478,7 +480,7 @@ class PPOAgent(CognitiveAgent):
                     self.entropy_coef * self.entropy_decay,
                     self.entropy_min
                 )
-        print("Entropy:", entropy_total / entropy_count)
+        # print("Entropy:", entropy_total / entropy_count)
         # ------------------------------------------------
         # Clear buffers
         # ------------------------------------------------
@@ -508,6 +510,10 @@ class PPOAgent(CognitiveAgent):
 
             "fftSize": self.fftSize,
             "cpiLen": self.cpiLen,
+
+            "batch_size": self.batch_size,
+            "bptt_chunk": self.bptt_chunk
+
         }
 
         if self.scheduler is not None:
@@ -564,6 +570,16 @@ class PPOAgent(CognitiveAgent):
         self.clip_eps = checkpoint.get(
             "clip_eps",
             self.clip_eps
+        )
+
+        self.batch_size = checkpoint.get(
+            "batch_size",
+            self.batch_size
+        )
+
+        self.bptt_chunk = checkpoint.get(
+            "bptt_chunk",
+            self.bptt_chunk
         )
 
         # ------------------------------------------------

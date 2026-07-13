@@ -4,6 +4,7 @@ import torch
 SIM_MODE = False          # True = synthetic, False = live spectrum
 MULTI_AGENT = True
 EVAL_MODE = False
+RANDOM_START_INDICES = True
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SEED = 42069
@@ -14,11 +15,11 @@ LOAD_CHECKPOINTS = False
 AUTO_SAVE_LATEST = False
 
 
-OUTPUT_FILE = "./Output/agent_eval_summary.xlsx"
+OUTPUT_FILE = "./Output/agent_eval_summary_goodConfigs264MfosMulti.xlsx"
 
-DATA_CHOICE = "245"
+# DATA_CHOICE = "245"
 # DATA_CHOICE = "u245"
-# DATA_CHOICE = "264"
+DATA_CHOICE = "264"
 # DATA_CHOICE = "u264"
 
 SPECTRUM_FILES = {
@@ -63,12 +64,12 @@ AGENTS = {
         "rectangular": 0
     },
     "random_start": 0,
-    "saa": 1,
-    "ppo": 1,
-    "dqn": 1,
-    "mfos": 1,
+    "saa": 0,
+    "ppo": 0,
+    "dqn": 0,
+    "mfos": 0,
     "dpg": 0,
-    "ablated_mfos": 1
+    "ablated_mfos": 3
 }
 
 # PPO

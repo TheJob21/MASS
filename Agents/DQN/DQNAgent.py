@@ -6,10 +6,12 @@ import numpy as np
 from Agents.CognitiveAgent import CognitiveAgent
 
 class DQNAgent(CognitiveAgent):
-    def __init__(self, actionList, currentAction=None, fftSize=1024, rng=None, cpiLen=256, device="cpu", dqnActions=None):
+    def __init__(self, actionList, currentAction=None, fftSize=1024, seed=0, cpiLen=256, device="cpu",
+                 epsilon=1.0, gamma=0.9, lr=1e-4, batch_size=32):
         super().__init__(currentAction, fftSize, cpiLen)
         
-        self.actions = actionList
+        self.DQN_ACTIONS = actionList
+        self.lr = lr
         self.device = device
 
         self.policy = SpectrumDQN(fftSize, len(actionList)).to(device)
@@ -17,16 +19,16 @@ class DQNAgent(CognitiveAgent):
         self.target.load_state_dict(self.policy.state_dict())
 
         self.buffer = ReplayBuffer()
-        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=1e-4)
+        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=lr)
 
-        self.epsilon = 1.0
+        self.epsilon = epsilon
         self.epsilon_min = 0.05
         self.epsilon_decay = 0.9995
-        self.gamma = 0.9
+        self.gamma = gamma
+        self.batch_size=batch_size
         self.state_t = None
         self.action_idx = None
-        self.DQN_ACTIONS=dqnActions
-        self.rng = rng
+        self.rng = np.random.default_rng(seed)
 
     def selectAction(self, state_seq, eval_mode):
         self.state_t = state_seq[-1].astype(np.float32)
@@ -39,11 +41,11 @@ class DQNAgent(CognitiveAgent):
         
         if self.rng == None:
             if np.random.rand() < self.epsilon:
-                self.action_idx = np.random.randint(len(self.actions))
+                self.action_idx = np.random.randint(len(self.DQN_ACTIONS))
                 interval = self.DQN_ACTIONS[self.action_idx]
                 self.currentAction = interval
         elif self.rng.random() < self.epsilon:
-            self.action_idx = self.rng.integers(len(self.actions))
+            self.action_idx = self.rng.integers(len(self.DQN_ACTIONS))
             interval = self.DQN_ACTIONS[self.action_idx]
             self.currentAction = interval
 
@@ -53,11 +55,11 @@ class DQNAgent(CognitiveAgent):
             interval = self.DQN_ACTIONS[self.action_idx]
             self.currentAction = interval
 
-    def train_step(self, batch_size=32):
-        if len(self.buffer) < batch_size:
+    def train_step(self):
+        if len(self.buffer) < self.batch_size:
             return
 
-        s, a, r, s2, d = self.buffer.sample(batch_size, rng=self.rng)
+        s, a, r, s2, d = self.buffer.sample(self.batch_size, rng=self.rng)
 
         q = self.policy(s).gather(1, a.unsqueeze(1)).squeeze()
         with torch.no_grad():
@@ -79,10 +81,10 @@ class DQNAgent(CognitiveAgent):
             "optimizer_state_dict": self.optimizer.state_dict(),
 
             "epsilon": self.epsilon,
-
             "epsilon_min": self.epsilon_min,
             "epsilon_decay": self.epsilon_decay,
             "gamma": self.gamma,
+            "batch_size": self.batch_size,
 
             "fftSize": self.fftSize,
             "cpiLen": self.cpiLen,
@@ -128,6 +130,11 @@ class DQNAgent(CognitiveAgent):
         self.gamma = checkpoint.get(
             "gamma",
             self.gamma
+        )
+
+        self.batch_size = checkpoint.get(
+            "batch_size",
+            self.batch_size
         )
 
         self.policy.to(self.device)

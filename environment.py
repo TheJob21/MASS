@@ -417,7 +417,7 @@ class Environment:
         self.cfg.SEED += 1
         randomStartAgentRNG = np.random.default_rng(self.cfg.SEED)
         self.cfg.SEED += 1
-        dqnAgentRNG = np.random.default_rng(self.cfg.SEED)
+        dqnSeed = self.cfg.SEED
         self.cfg.SEED += 1
         ppoSeed=self.cfg.SEED
         self.cfg.SEED += 1
@@ -485,7 +485,8 @@ class Environment:
         for randAgent in range(numRandomStartAgents):
             randomStartAgents.append(FixedStartAgent(rng=randomStartAgentRNG))
             randomStartAgents[randAgent].storeAction(randomStartAgents[randAgent].curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency))
-            allCogAgentsStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+            startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
+            allCogAgentsStartIndices.append(startIndex)
             allCogAgents.append(randomStartAgents[randAgent])
             
         # SAA Agent Parameters
@@ -494,15 +495,37 @@ class Environment:
         for saaAgent in range(numSaaAgents):
             saaAgents.append(SAAAgent())
 
-            allCogAgentsStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+            startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
+            allCogAgentsStartIndices.append(startIndex)
             allCogAgents.append(saaAgents[saaAgent])
             
         # PPO Agent Parameters
         numPpoAgents = self.cfg.AGENTS['ppo'] # Proximal Policy Optimization
         ppoAgents = []
         for ppoAgent in range(numPpoAgents):
-            ppoAgents.append(PPOAgent(fftSize=self.cfg.FFT_SIZE, cpiLen=self.cfg.CPI_LEN, device=self.cfg.DEVICE, seed=ppoSeed+ppoAgent))
-            allCogAgentsStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+            bestConfig = {
+                "lr": 3.62e-4,   # log-uniform
+                "gamma": 0.9514,                        # uniform
+                "lam": 0.9514,
+                "clip": 0.277,
+                "entropy_coef": 0.04019,
+                "batch_size": 64,
+                "bptt_chunk": 16
+            }
+            
+            ppoAgents.append(PPOAgent(fftSize=self.cfg.FFT_SIZE, 
+                                      cpiLen=self.cfg.CPI_LEN, 
+                                      device=self.cfg.DEVICE,
+                                      gamma=bestConfig.get("gamma"),
+                                      lam=bestConfig.get("lam"),
+                                      clip_eps=bestConfig.get("clip"),
+                                      lr=bestConfig.get("lr"),
+                                      batch_size=bestConfig.get("batch_size"),
+                                      bptt_chunk=bestConfig.get("bptt_chunk"),
+                                      entropy_coef=bestConfig.get("entropy_coef"),
+                                      seed=ppoSeed+ppoAgent))
+            startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
+            allCogAgentsStartIndices.append(startIndex)
             allCogAgents.append(ppoAgents[ppoAgent])
 
         # DQN Agent Parameters
@@ -518,35 +541,53 @@ class Environment:
         numDqnAgents = self.cfg.AGENTS['dqn']
         dqnAgents = []
         for dqnAgent in range(numDqnAgents):
-            dqnAgents.append(DQNAgent(fftSize=self.cfg.FFT_SIZE, actionList=DQN_ACTIONS, rng=dqnAgentRNG, cpiLen=self.cfg.CPI_LEN, device=self.cfg.DEVICE, dqnActions=DQN_ACTIONS))
-            allCogAgentsStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+            
+            bestConfig = {
+                "lr": 4.42e-5,   # log-uniform
+                "gamma": 0.9281,                        # uniform
+                "epsilon": 0.8175,
+                "batch_size": 32            
+            }
+            
+            dqnAgents.append(DQNAgent(actionList=DQN_ACTIONS,
+                            fftSize=self.cfg.FFT_SIZE,
+                            seed=dqnSeed+dqnAgent,
+                            cpiLen=self.cfg.CPI_LEN, 
+                            device=self.cfg.DEVICE,
+                            epsilon=bestConfig.get("epsilon"),
+                            gamma=bestConfig.get("gamma"),
+                            lr=bestConfig.get("lr"), 
+                            batch_size=bestConfig.get("batch_size")))
+            startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
+            allCogAgentsStartIndices.append(startIndex)
             allCogAgents.append(dqnAgents[dqnAgent])
 
         # M-FOS Agent Initialization
         numMfosAgents = self.cfg.AGENTS['mfos']
         mfosAgents = []
         for mfosAgentI in range(numMfosAgents):
-            # base_genome = {
-            #     "lr": 1.4e-5,
-            #     "gamma": 0.989,
-            #     "exploration_center": 0.151,
-            #     "exploration_bw": 0.14,
-            #     "entropy_coef": .00013
-            # }
-            base_genome = None # Random Genomes
+            base_genome = {
+                "lr": 4.99e-4,
+                "gamma": 0.9509,
+                "exploration_center": 0.711,
+                "exploration_bw": 0.06077,
+                "entropy_coef": .00401
+            }
+            # base_genome = None # Random Genomes
             mfosAgent = MFOSAgent(
                 population_size=5,
                 base_genome=base_genome,
                 mutation_scale=0.05,
                 elite_fraction=.4,
                 fresh_fraction=0.2,
-                seed=self.cfg.SEED + mfosAgentI + 1, #42075 is good for random genomes and weights?
+                seed=self.cfg.SEED + mfosAgentI, #42075 is good for random genomes and weights?
                 device=self.cfg.DEVICE,
                 fftSize=self.cfg.FFT_SIZE,
                 cpiLen=self.cfg.CPI_LEN
             )
             mfosAgents.append(mfosAgent)
-            allCogAgentsStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+            startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
+            allCogAgentsStartIndices.append(startIndex)
             allCogAgents.append(mfosAgent)
 
         # DPG Agent Initialization
@@ -554,21 +595,31 @@ class Environment:
         dpgAgents = []
         for i in range(numDpgAgents):
             dpgAgents.append(DPGAgent(fftSize=self.cfg.FFT_SIZE, device=self.cfg.DEVICE))
-            allCogAgentsStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+            startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
+            allCogAgentsStartIndices.append(startIndex)
             allCogAgents.append(dpgAgents[i])
 
         # Ablated M-FOS Agent Initialization
         numAblatedMfosAgents = self.cfg.AGENTS['ablated_mfos']
         ablatedMFOSAgents = []
         for mfosAgentI in range(numAblatedMfosAgents):
+            genome = {
+                "lr": 4.99e-4,
+                "gamma": 0.9509,
+                "exploration_center": 0.711,
+                "exploration_bw": 0.06077,
+                "entropy_coef": .00401
+            }
             ablatedMfosAgent = AblatedMFOSAgent(
                 fftSize=self.cfg.FFT_SIZE,
                 cpiLen=self.cfg.CPI_LEN,
                 device=self.cfg.DEVICE,
+                genome=genome,
                 seed=self.cfg.SEED + mfosAgentI + 1 #42075 is good for random genomes and weights?
             )
             ablatedMFOSAgents.append(ablatedMfosAgent)
-            allCogAgentsStartIndices.append(torch.randint(low=0, high=iterationsInPulse, size=(1,)).item())
+            startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
+            allCogAgentsStartIndices.append(startIndex)
             allCogAgents.append(ablatedMfosAgent)
 
         if self.cfg.LOAD_CHECKPOINTS:
@@ -1053,3 +1104,434 @@ class Environment:
         print(df)
 
         input("Press Enter to close all plots and exit...")
+
+    def successiveHalving(self):
+        self.cfg.MULTI_AGENT = False
+        currentState = staticState = self.initState() # S
+        occupiedBwPerIteration = []
+        spectrumSampleSize=30_000
+        allStates = []
+        deadspace = [] # MHz
+        staticAgentRNG = np.random.default_rng(self.cfg.SEED)
+        self.cfg.SEED += 1
+        dqnSeed = self.cfg.SEED
+        self.cfg.SEED += 1
+        ppoSeed=self.cfg.SEED
+        self.cfg.SEED += 1
+        mfosSeed=self.cfg.SEED
+        self.cfg.SEED += 1
+        torch.Generator(device=self.cfg.DEVICE).manual_seed(self.cfg.SEED)
+
+
+        liveDataFilename = self.cfg.SPECTRUM_FILES[self.cfg.DATA_CHOICE]
+        storedStateFile = self.cfg.STORED_STATE_MAP[liveDataFilename]
+        startingFrequency = self.cfg.STARTING_FREQUENCY_MAP[storedStateFile]
+
+        if not self.cfg.SIM_MODE and not os.path.exists(storedStateFile) and not os.path.exists(liveDataFilename):
+            print(f"Warning: files not found -> {storedStateFile} -> {liveDataFilename}")
+            self.cfg.SIM_MODE = True
+
+        # If precomputed file exists, just load it
+        if not self.cfg.SIM_MODE:
+            if os.path.exists(storedStateFile):
+                npz = np.load(storedStateFile)
+                liveData = npz["states"]  # shape (num_samples, fftSize), dtype=bool
+                print("Loaded precomputed states:", liveData.shape)
+            else:
+                liveData = []
+                sp = SignalProcessor(self.cfg)
+                with open(liveDataFilename, "rb") as f:
+                    while True:
+                        state = sp.compute_state_from_file(f)
+                        if state is None:
+                            break
+                        liveData.append(state)
+                
+                liveData = np.stack(liveData)  # (num_samples, fftSize)
+                
+                # Save for future reuse
+                np.savez_compressed(storedStateFile, states=liveData)
+                print("Saved precomputed states:", liveData.shape)
+
+        iterations = self.cfg.ITERATIONS if self.cfg.SIM_MODE else liveData.shape[0]
+        timestep = pulseWidth = 10.24
+        iterationsInPulse = int(self.cfg.PRI / timestep)
+
+
+        # Static Agents For Simulating Environment
+        staticAgents = []
+        numLargeAgents = self.cfg.AGENTS['static']['fat'] # pw .1 - .25K, interval 10K, 150-175 bins wide
+        numSkinnyAgents = self.cfg.AGENTS['static']['skinny'] # pw .25K, interval 2K, 20 bins wide
+        numPulsedAgents = self.cfg.AGENTS['static']['pulsed'] # pw .1K, interval = 4K, 30-40 bins wide on/off
+        numRectangleAgents = self.cfg.AGENTS['static']['rectangular'] # pw = 50, interval = 10 -250,  60-680 bins
+        numStaticAgents = numLargeAgents + numSkinnyAgents + numPulsedAgents + numRectangleAgents
+        for staticAgent in range(numLargeAgents):
+            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Fat))
+        for staticAgent in range(numSkinnyAgents):
+            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Skinny))
+        for staticAgent in range(numPulsedAgents):
+            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Pulsed))
+        for staticAgent in range(numRectangleAgents):
+            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Rectangular))
+
+        # PPO Agent Parameters
+        numPpoAgents = 0 #self.cfg.AGENTS['ppo'] # Proximal Policy Optimization
+        ppoTrials = []
+        ppoAgentRNG = np.random.default_rng(ppoSeed)
+        for ppoAgentI in range(numPpoAgents):
+            config = {
+                "lr": np.exp(ppoAgentRNG.uniform(np.log(1e-5), np.log(1e-3))),   # log-uniform
+                "gamma": ppoAgentRNG.uniform(0.95, 0.999),                        # uniform
+                "lam": ppoAgentRNG.uniform(0.90, 0.99),
+                "clip": ppoAgentRNG.uniform(0.1, 0.3),
+                "entropy_coef": ppoAgentRNG.uniform(0.0, 0.05),
+                "batch_size": ppoAgentRNG.choice([4,8,16,32,64]),
+                "bptt_chunk": ppoAgentRNG.choice([8,16,32,64,128])
+            }
+            
+            
+            agent = PPOAgent(fftSize=self.cfg.FFT_SIZE, 
+                                      cpiLen=self.cfg.CPI_LEN, 
+                                      device=self.cfg.DEVICE,
+                                      gamma=config.get("gamma"),
+                                      lam=config.get("lam"),
+                                      clip_eps=config.get("clip"),
+                                      lr=config.get("lr"),
+                                      batch_size=config.get("batch_size"),
+                                      bptt_chunk=config.get("bptt_chunk"),
+                                      entropy_coef=config.get("entropy_coef"),
+                                      seed=ppoSeed+ppoAgentI)
+            ppoTrials.append({
+                "agent": agent,
+                "config": config,
+                "history": deque(maxlen=iterationsInPulse)
+            })
+
+        # DQN Agent Parameters
+        BANDWIDTHS = [96, 128, 160] #[32, 64, 96]
+        CENTERS = np.linspace(0, self.cfg.FFT_SIZE-1, 32, dtype=int)
+        DQN_ACTIONS = []
+        for bw in BANDWIDTHS:
+            for c in CENTERS:
+                start = max(0, c - bw // 2)
+                stop  = min(self.cfg.FFT_SIZE, start + bw)
+                if stop - start == bw:
+                    DQN_ACTIONS.append((start, stop))
+        numDqnAgents = 0
+        dqnTrials = []
+        dqnAgentRNG = np.random.default_rng(dqnSeed)
+        for dqnAgentI in range(numDqnAgents):
+            config = {
+                "lr": np.exp(dqnAgentRNG.uniform(np.log(1e-5), np.log(1e-3))),   # log-uniform
+                "gamma": dqnAgentRNG.uniform(0.9, 0.999),                        # uniform
+                "epsilon": dqnAgentRNG.uniform(0.8, 1),
+                "batch_size": dqnAgentRNG.choice([32, 64, 128])            
+            }
+            
+            
+            agent = DQNAgent(actionList=DQN_ACTIONS,
+                            fftSize=self.cfg.FFT_SIZE,
+                            seed=dqnSeed+dqnAgentI,
+                            cpiLen=self.cfg.CPI_LEN, 
+                            device=self.cfg.DEVICE,
+                            epsilon=config.get("epsilon"),
+                            gamma=config.get("gamma"),
+                            lr=config.get("lr"), 
+                            batch_size=config.get("batch_size"))
+            dqnTrials.append({
+                "agent": agent,
+                "config": config,
+                "history": deque(maxlen=iterationsInPulse)
+            })
+
+        # Ablated M-FOS Agent Initialization
+        numAblatedMfosAgents = 135
+        ablatedMFOSTrials = []
+        mfosRNG = np.random.default_rng(mfosSeed)
+        for mfosAgentI in range(numAblatedMfosAgents):
+            config = {
+                "lr": 10 ** mfosRNG.uniform(-5, -3),
+                "gamma": mfosRNG.uniform(0.9, 0.999),                        # uniform
+                "exploration_center": mfosRNG.uniform(0.01, 0.3),
+                "exploration_bw": mfosRNG.uniform(0.01, 0.2),
+                "entropy_coef": 10 ** mfosRNG.uniform(-4, -2)       
+            }
+            agent = AblatedMFOSAgent(
+                fftSize=self.cfg.FFT_SIZE,
+                cpiLen=self.cfg.CPI_LEN,
+                device=self.cfg.DEVICE,
+                genome=config,
+                seed=mfosSeed + mfosAgentI #42075 is good for random genomes and weights?
+            )
+            ablatedMFOSTrials.append({
+                "agent": agent,
+                "config": config,
+                "history": deque(maxlen=iterationsInPulse)
+            })
+    
+        binOwnership = np.zeros(self.cfg.FFT_SIZE, dtype=np.int16) # 0=unowned, 1=staticOwner, 2+=cogUser
+
+        CHECKPOINTS = [
+            12500 * iterationsInPulse,
+            25000 * iterationsInPulse,
+            37500 * iterationsInPulse,
+            iterations
+        ]
+
+        # main loop
+        for i in range(iterations): # 1 = 12.8 microseconds
+            if i in CHECKPOINTS:
+                scores = []
+                for trial in ppoTrials:
+                    reward = np.mean(
+                        trial["agent"].allRewards[-12500:]
+                    )
+                    scores.append((reward, trial))
+                scores.sort(
+                    key=lambda x: x[0],
+                    reverse=True
+                )
+                keep = len(scores) // 3
+                ppoTrials = [
+                    trial
+                    for _, trial in scores[:keep]
+                ]
+
+                scores = []
+                for trial in dqnTrials:
+                    reward = np.mean(
+                        trial["agent"].allRewards[-12500:]
+                    )
+                    scores.append((reward, trial))
+                scores.sort(
+                    key=lambda x: x[0],
+                    reverse=True
+                )
+                keep = len(scores) // 3
+                dqnTrials = [
+                    trial
+                    for _, trial in scores[:keep]
+                ]
+
+                scores = []
+                for trial in ablatedMFOSTrials:
+                    reward = np.mean(
+                        trial["agent"].allRewards[-12500:]
+                    )
+                    scores.append((reward, trial))
+                scores.sort(
+                    key=lambda x: x[0],
+                    reverse=True
+                )
+                keep = len(scores) // 3
+                ablatedMFOSTrials = [
+                    trial
+                    for _, trial in scores[:keep]
+                ]
+
+            if i % 100_000 == 0:
+                print(int(i/1000), "K iterations completed.")
+            
+            # store previous state space without the active agents action
+            for trial in ppoTrials:
+                trial["history"].append(staticState.copy())
+            for trial in dqnTrials:
+                trial["history"].append(staticState.copy())
+            for trial in ablatedMFOSTrials:
+                trial["history"].append(staticState.copy())
+
+            # Generate actions for agents
+            for trial in ppoTrials:
+                agent = trial["agent"]
+                if i % iterationsInPulse == 0: # every 204.8 usec
+                    agentStates = trial["history"]
+                    if len(agentStates) == iterationsInPulse:
+                        agent.selectAction(state_seq=agentStates, eval_mode=self.cfg.EVAL_MODE)
+                        agent.storeAction(agent.curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency))
+                elif i % iterationsInPulse == 1: # Pulse lasts one iteration, then listens for PRI duration
+                    agent.isTransmitting = False
+            for trial in dqnTrials:
+                agent = trial["agent"]
+                if i % iterationsInPulse == 0: # every 204.8 usec
+                    agentStates = trial["history"]
+                    if len(agentStates) == iterationsInPulse:
+                        agent.selectAction(state_seq=agentStates, eval_mode=self.cfg.EVAL_MODE)
+                        agent.storeAction(agent.curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency))
+                elif i % iterationsInPulse == 1: # Pulse lasts one iteration, then listens for PRI duration
+                    agent.isTransmitting = False
+            for trial in ablatedMFOSTrials:
+                agent = trial["agent"]
+                if i % iterationsInPulse == 0: # every 204.8 usec
+                    agentStates = trial["history"]
+                    if len(agentStates) == iterationsInPulse:
+                        agent.selectAction(state_seq=agentStates, eval_mode=self.cfg.EVAL_MODE)
+                        agent.storeAction(agent.curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency))
+                elif i % iterationsInPulse == 1: # Pulse lasts one iteration, then listens for PRI duration
+                    agent.isTransmitting = False   
+
+                    
+            # Static Agent Actions. Simulate frequency changes
+            currentState = self.initState()
+            for staticAgent in staticAgents:
+                staticAgent.iterateCurrentAction(iteration=i)
+            for j in range(numStaticAgents):
+                # Every 50_000 iterations, choose a new action
+                if ((staticAgents[j].staticType == StaticType.Fat or StaticType.Pulsed) and (j + 1) * 100_000 == i) or (staticAgents[j].staticType == StaticType.Skinny and (j + 1) * 30_000 == i):
+                    staticAgents[j].takeRandomAction()
+            for staticAgent in staticAgents:
+                currentState = self.updateStateInterval(currentState, staticAgent.currentAction)
+            
+            if self.cfg.SIM_MODE == False: # Use Live Data
+                currentState = currentState | liveData[i%len(liveData)]
+                
+            staticState = currentState.copy()
+            
+            # Update state
+            occupiedBwPerIteration.append(np.sum(currentState) * self.cfg.BIN_SIZE)
+            
+            self.updateBinOwnership(
+                binOwnership=binOwnership, 
+                staticState=staticState, 
+                cognitiveAgents=([trial["agent"] for trial in ppoTrials] + [trial["agent"] for trial in dqnTrials] + [trial["agent"] for trial in ablatedMFOSTrials])
+            )
+            # Only build labeled state for final sample size
+            if i >= iterations-spectrumSampleSize: 
+                allStates.append(self.build_labeled_state(
+                    staticState=staticState,
+                    listOfAgents=([trial["agent"] for trial in ppoTrials] + [trial["agent"] for trial in dqnTrials] + [trial["agent"] for trial in ablatedMFOSTrials]),
+                    binOwnership=binOwnership
+                ))
+            deadSpaceInterval = self.getLargestDeadSpaceInterval(currentState)
+            if deadSpaceInterval == None:
+                deadspace.append(0)
+            else: 
+                deadspace.append((deadSpaceInterval[1] - deadSpaceInterval[0]) * self.cfg.BIN_SIZE)
+            
+
+            # Compute reward for cognitive agents
+            Rewards.computeRewardsForAgents(
+                cognitiveAgents=([trial["agent"] for trial in ppoTrials] + [trial["agent"] for trial in dqnTrials] + [trial["agent"] for trial in ablatedMFOSTrials]),
+                binOwnership=binOwnership,
+                config=self.cfg,
+                startingFrequency=startingFrequency
+            )
+            
+            if i > 0 and len(ablatedMFOSTrials[0]["history"]) == iterationsInPulse: # every 204.8 usec
+                # Update PPO Agents
+                for ppoAgent in [trial["agent"] for trial in ppoTrials]:
+                    if len(ppoAgent.allRewards) > 0 and len(ppoAgent.pulseRewards) == 0:
+                        ppoAgent.store_reward(
+                            reward=ppoAgent.allRewards[-1],
+                            done=False
+                        )
+                        ppoAgent.update()
+                # Update DQN Agents
+                for dqnAgent in [trial["agent"] for trial in dqnTrials]:
+                    if len(dqnAgent.allRewards) > 0 and len(dqnAgent.pulseRewards) == 0:
+                        dqnAgent.buffer.push(
+                            dqnAgent.state_t,
+                            dqnAgent.action_idx,
+                            dqnAgent.allRewards[-1],
+                            currentState.astype(np.float32),
+                            False
+                        )
+                        dqnAgent.train_step()
+                        
+                
+                # Update Ablated M-FOS Agents  
+                for ablatedMfosAgent in [trial["agent"] for trial in ablatedMFOSTrials]:
+                    if len(ablatedMfosAgent.allRewards) > 0 and len(ablatedMfosAgent.pulseRewards) == 0:
+                        ablatedMfosAgent.record_reward(reward=ablatedMfosAgent.allRewards[-1])
+                        ablatedMfosAgent.update()
+
+            if i % (iterationsInPulse * 1000) == 0:
+                for dqnAgent in [trial["agent"] for trial in dqnTrials]:
+                    dqnAgent.target.load_state_dict(dqnAgent.policy.state_dict())
+                
+
+        liveData = None
+
+        scores = []
+
+        for trial in ppoTrials:
+            agent = trial["agent"]
+            reward = np.mean(agent.allRewards)
+            scores.append((reward, trial))
+
+        scores.sort(key=lambda x: x[0], reverse=True)
+
+        print("\n==============================")
+        print("Top 5 PPO Hyperparameter Trials")
+        print("==============================")
+
+        print("\nRank | Reward | Learning Rate | Gamma | Lambda | Clip | Entropy | Batch Size | BPTT Chunk")
+        print("-" * 80)
+
+        for rank, (reward, trial) in enumerate(scores, start=1):
+            cfg = trial["config"]
+            print(
+                f"{rank:4d} | "
+                f"{reward:7.3f} | "
+                f"{cfg['lr']:.2e} | "
+                f"{cfg['gamma']:.4f} | "
+                f"{cfg['lam']:.4f} | "
+                f"{cfg['clip']:.3f} | "
+                f"{cfg['entropy_coef']:.5f} | "
+                f"{cfg['batch_size']:.5f} | "
+                f"{cfg['bptt_chunk']:.5f}"
+            )
+
+        scores = []
+
+        for trial in dqnTrials:
+            agent = trial["agent"]
+            reward = np.mean(agent.allRewards)
+            scores.append((reward, trial))
+
+        scores.sort(key=lambda x: x[0], reverse=True)
+
+        print("\n==============================")
+        print("Top 5 DQN Hyperparameter Trials")
+        print("==============================")
+
+        print("\nRank | Reward | Learning Rate | Gamma | Epsilon | Batch Size")
+        print("-" * 80)
+
+        for rank, (reward, trial) in enumerate(scores, start=1):
+            cfg = trial["config"]
+            print(
+                f"{rank:4d} | "
+                f"{reward:7.3f} | "
+                f"{cfg['lr']:.2e} | "
+                f"{cfg['gamma']:.4f} | "
+                f"{cfg['epsilon']:.4f} | "
+                f"{cfg['batch_size']:.5f}"
+            )
+
+        scores = []
+
+        for trial in ablatedMFOSTrials:
+            agent = trial["agent"]
+            reward = np.mean(agent.allRewards)
+            scores.append((reward, trial))
+
+        scores.sort(key=lambda x: x[0], reverse=True)
+
+        print("\n==============================")
+        print("Top 5 Ablated M-FOS Hyperparameter Trials")
+        print("==============================")
+
+        print("\nRank | Reward | Learning Rate | Gamma | Exploration Center | Exploration BW | Entropy")
+        print("-" * 80)
+
+        for rank, (reward, trial) in enumerate(scores, start=1):
+            cfg = trial["config"]
+            print(
+                f"{rank:4d} | "
+                f"{reward:7.3f} | "
+                f"{cfg['lr']:.2e} | "
+                f"{cfg['gamma']:.4f} | "
+                f"{cfg['exploration_center']:.4f} | "
+                f"{cfg['exploration_bw']:.5f} | "
+                f"{cfg['entropy_coef']:.5f}"
+            )

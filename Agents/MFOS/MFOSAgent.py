@@ -696,12 +696,16 @@ class AblatedMFOSAgent(CognitiveAgent):
         fftSize=1024, 
         cpiLen=256,
         device='cpu',
+        genome=None,
         seed=0
     ):
         super().__init__(currentAction, fftSize, cpiLen)
         self.eval_mode = False
         self.np_rng = np.random.default_rng(seed)
-        self.policy = RNN(random_genome(self.np_rng), fftSize=fftSize, device=device, seed=seed)
+        if genome is None:
+            self.policy = RNN(random_genome(self.np_rng), fftSize=fftSize, device=device, seed=seed)
+        else:
+            self.policy = RNN(genome, fftSize=fftSize, device=device, seed=seed)
 
     def set_eval_mode(self):
         self.eval_mode = True
