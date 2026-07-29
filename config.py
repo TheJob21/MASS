@@ -1,7 +1,7 @@
 import torch
 
 # GENERAL EXECUTION SETTINGS
-SIM_MODE = False          # True = synthetic, False = live spectrum
+SIM_MODE = True          # True = synthetic, False = live spectrum
 MULTI_AGENT = True
 EVAL_MODE = False
 RANDOM_START_INDICES = True
@@ -15,11 +15,11 @@ LOAD_CHECKPOINTS = False
 AUTO_SAVE_LATEST = False
 
 
-OUTPUT_FILE = "./Output/agent_eval_summary_goodConfigs264MfosMulti.xlsx"
+OUTPUT_FILE = "./Output/agent_eval_summary_PpoLimitedObservation.xlsx"
 
-# DATA_CHOICE = "245"
+DATA_CHOICE = "245"
 # DATA_CHOICE = "u245"
-DATA_CHOICE = "264"
+# DATA_CHOICE = "264"
 # DATA_CHOICE = "u264"
 
 SPECTRUM_FILES = {
@@ -58,10 +58,10 @@ HOCAE_PFA = 1e-2
 # AGENT COUNTS
 AGENTS = {
     "static": {
-        "fat": 0,
-        "skinny": 0,
-        "pulsed": 0,
-        "rectangular": 0
+        "fat": 1,
+        "skinny": 1,
+        "pulsed": 1,
+        "rectangular": 1
     },
     "random_start": 0,
     "saa": 0,
@@ -69,7 +69,7 @@ AGENTS = {
     "dqn": 0,
     "mfos": 0,
     "dpg": 0,
-    "ablated_mfos": 3
+    "ablated_mfos": 0
 }
 
 # PPO
@@ -114,12 +114,12 @@ MFOS = {
 # collisionTransmissionTolRatio = 0.033
 
 REWARD = {
-    "collision_ratio": 0.033,
+    "collision_ratio": 0.4,#0.033,
     "beta": 0.75,
     "transmission_weight": 1.0,
     "collision_weight": None,  # computed dynamically if needed
-    "bandwidth_distortion": 0.5,
-    "center_distortion": 0.5,
+    "bandwidth_distortion": 0.1,
+    "center_distortion": 0.1,
     "deadspace_penalty_scale": 1.0
 }
 
@@ -127,8 +127,15 @@ REWARD["collision_weight"] = (
     REWARD["transmission_weight"] / REWARD["collision_ratio"]
 )
 
+LIMIT_OBSERVATION = True
+OBSERVATION_BIN_SIZE = 300
+if not LIMIT_OBSERVATION:
+    OBSERVATION_BIN_SIZE = FFT_SIZE
+
+OBSERVATION_CENTER_COUNT = 3
+
 # RUNTIME CONTROL
-ITERATIONS = 300_000
+ITERATIONS = 110_000
 SPECTRUM_SAMPLE_SIZE = 30_000
 
 EVAL_SPLIT = 0.8

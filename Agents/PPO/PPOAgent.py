@@ -8,19 +8,26 @@ from Agents.CognitiveAgent import CognitiveAgent
 class RecurrentSpectrumPPO(nn.Module):
     def __init__(
         self,
-        fftSize=1024,
+        observationSize=1024,
         d_model=128,
         lstm_hidden=128,
-        action_dim=2,
+        action_dim=5,
         num_heads=4,
         num_snapshots=20
     ):
         super().__init__()
-
+        self.action_dim = action_dim
         
         # Intra-pulse encoder
-        self.embedding = nn.Linear(fftSize, d_model)
+        self.embedding = nn.Linear(observationSize, d_model)
         
+        # NEW: Center-frequency embedding
+        self.observation_center_embedding = nn.Sequential(
+            nn.Linear(1, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, d_model)
+        )
+
         # ✅ Learnable positional encoding for 20 snapshots
         self.pos_embedding = nn.Parameter(
             torch.zeros(1, num_snapshots, d_model)
@@ -38,16 +45,15 @@ class RecurrentSpectrumPPO(nn.Module):
 
         # Temporal memory across decisions
         self.lstm = nn.LSTM(
-            input_size=d_model + action_dim + 1, # Action and CPI Index added here
+            input_size=d_model + self.action_dim + 1, # Action and CPI Index added here
             hidden_size=lstm_hidden,
             batch_first=True
         )
 
         # Actor head
-        self.mu = nn.Linear(lstm_hidden, action_dim)
-        self.mu.bias.data = torch.tensor([-1.0, 1.0])  # center=0 (mid-band), bandwidth raw=1.0 → ~88% BW
+        self.mu = nn.Linear(lstm_hidden, self.action_dim)
 
-        self.log_std = nn.Linear(lstm_hidden, action_dim)
+        self.log_std = nn.Linear(lstm_hidden, self.action_dim)
 
         # Critic head
         self.value = nn.Linear(lstm_hidden, 1)
@@ -61,6 +67,11 @@ class RecurrentSpectrumPPO(nn.Module):
 
         # Positional embedding
         nn.init.normal_(self.pos_embedding, mean=0.0, std=0.02)
+
+        for layer in self.observation_center_embedding:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
+                nn.init.zeros_(layer.bias)
 
         # Attention
         for name, p in self.snapshot_attn.named_parameters():
@@ -86,7 +97,11 @@ class RecurrentSpectrumPPO(nn.Module):
         # Actor
         nn.init.orthogonal_(self.mu.weight, gain=0.01)
         nn.init.zeros_(self.mu.bias)
-        self.mu.bias.data = torch.tensor([-1.0, 1.0])
+        bias = torch.zeros(self.action_dim)
+        bias[0] = -1.0
+        bias[1] = 1.0
+
+        self.mu.bias.data = bias
 
         nn.init.orthogonal_(self.log_std.weight, gain=0.01)
         nn.init.constant_(self.log_std.bias, -1.0)
@@ -95,13 +110,14 @@ class RecurrentSpectrumPPO(nn.Module):
         nn.init.orthogonal_(self.value.weight, gain=1.0)
         nn.init.zeros_(self.value.bias)
 
-    def encode_pulse(self, pulse_seq):
-        """
-        pulse_snapshots: (B*T, 20, 1024)
-        """
+    def encode_pulse(self, pulse_seq, observationCenters):
 
         # Embed each snapshot
         x = F.relu(self.embedding(pulse_seq))  # (B*T, 20, d_model)
+
+        observation_center_embed = self.observation_center_embedding(observationCenters)
+
+        x = x + observation_center_embed
 
         S = x.size(1)
         
@@ -119,11 +135,12 @@ class RecurrentSpectrumPPO(nn.Module):
         x = self.attn_norm(x + attn_out)
 
         # Compress 20 snapshots → single vector
-        x = torch.max(x, dim=1).values  # (B*T, d_model)
+        # x = x.mean(dim=1)
+        x = x[:, -1, :]
         
         return x
 
-    def forward(self, pulse_seq_batch, prevActions, cpiIndices, hidden=None):
+    def forward(self, pulse_seq_batch, prevAction, observationCenters, cpiIndices, hidden=None):
         """
         pulse_seq_batch: (B, T, samples_per_pulse, 1024)
         """
@@ -133,11 +150,18 @@ class RecurrentSpectrumPPO(nn.Module):
         # Flatten B*T to encode pulses
         pulse_seq_batch = pulse_seq_batch.view(B * T, S, F)
 
-        encoded = self.encode_pulse(pulse_seq_batch)   # (B*T, d_model)
+        observationCenters = observationCenters.view(
+            B*T,S,1
+        )
+
+        encoded = self.encode_pulse(
+            pulse_seq_batch,
+            observationCenters
+        )
         encoded = encoded.view(B, T, -1)               # (B, T, d_model)
 
         # ---- Then LSTM ----
-        lstmInput = torch.cat([encoded, prevActions, cpiIndices], dim=-1)
+        lstmInput = torch.cat([encoded, prevAction, cpiIndices], dim=-1)
         lstm_out, hidden = self.lstm(lstmInput, hidden)
 
         mu = self.mu(lstm_out)
@@ -149,8 +173,11 @@ class RecurrentSpectrumPPO(nn.Module):
 class PPOAgent(CognitiveAgent):
     def __init__(self, 
         currentAction=None, 
-        fftSize=1024, 
+        fftSize=1024,
+        observationSize=300,
         cpiLen=256,
+        iterationsPerPulse=20,
+        scanOffsetCount=3,
         policy: RecurrentSpectrumPPO=None,
         device="cpu",
         gamma=0.9617,
@@ -169,17 +196,17 @@ class PPOAgent(CognitiveAgent):
         horizon=1024,
         seed=None
     ):
-        super().__init__(currentAction, fftSize, cpiLen)
+        super().__init__(currentAction=currentAction, fftSize=fftSize, cpiLen=cpiLen, iterationsPerPulse=iterationsPerPulse, observationCenterCount=scanOffsetCount)
 
         # Initialize Weights of Critic
         self.torchRng = torch.Generator(device=device)
         if policy is None:
             if seed == None:
-                self.policy = RecurrentSpectrumPPO().to(device)
+                self.policy = RecurrentSpectrumPPO(observationSize=observationSize, action_dim=2+scanOffsetCount).to(device)
             else:
                 state = torch.random.get_rng_state()
                 torch.manual_seed(seed)
-                self.policy = RecurrentSpectrumPPO().to(device)
+                self.policy = RecurrentSpectrumPPO(observationSize=observationSize, action_dim=2+scanOffsetCount).to(device)
                 torch.random.set_rng_state(state)
                 
                 self.torchRng.manual_seed(seed)                
@@ -187,7 +214,8 @@ class PPOAgent(CognitiveAgent):
             self.policy = policy.to(device)
         
         self.device = device
-
+        
+        self.observationSize = observationSize
         self.gamma = gamma
         self.lam = lam
         self.clip_eps = clip_eps
@@ -224,6 +252,7 @@ class PPOAgent(CognitiveAgent):
         self.ret_rms_var  = 1.0
         self.ret_rms_count = 0
         self.prevActions = []
+        self.observationCenters = []
         self.cpiIndices = []
         
     def resetHidden(self):
@@ -234,6 +263,20 @@ class PPOAgent(CognitiveAgent):
         state_seq_np: (samples_per_pulse, 1024)
         """
         state_seq_np = np.stack(state_seq)
+
+        num_snapshots = len(state_seq_np)
+
+        observationCenters = self.getObservationCenters(
+            len(state_seq_np)
+        )
+
+
+        observationCenters = torch.tensor(
+            observationCenters,
+            dtype=torch.float32,
+            device=self.device
+        ).view(1,1,num_snapshots,1)
+
         state_tensor = torch.as_tensor(
             state_seq_np,
             dtype=torch.float32,
@@ -242,18 +285,27 @@ class PPOAgent(CognitiveAgent):
         
         # shape: (1, 1, samples_per_pulse, 1024)
         if self.currentAction is not None:
-            prev_action_tensor = torch.as_tensor(
-                [self.currentAction[0] / self.fftSize, self.currentAction[1] / self.fftSize],
+            prev_action = [
+                self.currentAction[0] / self.fftSize,
+                self.currentAction[1] / self.fftSize,
+            ]
+
+            prev_action.extend(
+                offset / self.fftSize
+                for offset in self.currentScanOffsets
+            )
+
+            prev_action_tensor = torch.tensor(
+                prev_action,
                 dtype=torch.float32,
                 device=self.device
-            ).view(1, 1, 2)
+            ).view(1, 1, -1)
         else:
             prev_action_tensor = torch.as_tensor(
-                [0, 0],
+                [0] * (2 + self.observationCenterCount),
                 dtype=torch.float32,
                 device=self.device
-            ).view(1, 1, 2)
-        self.prevActions.append(prev_action_tensor)
+            ).view(1, 1, 2+self.observationCenterCount)
         
         # store current CPI index
         i_pulse_tensor = torch.tensor(
@@ -261,19 +313,25 @@ class PPOAgent(CognitiveAgent):
             dtype=torch.float32,
             device=self.device
         ).view(1, 1, 1)  # (B=1, T=1, 1)
-        self.cpiIndices.append(i_pulse_tensor)
+
+        if not eval_mode:
+            self.observationCenters.append(observationCenters)
+            self.prevActions.append(prev_action_tensor)
+            self.cpiIndices.append(i_pulse_tensor)
         
         with torch.no_grad():
 
             # store hidden BEFORE step
-            self.hiddens.append(
-                None if self.hidden is None else
-                (self.hidden[0].detach(), self.hidden[1].detach())
-            )
+            if not eval_mode:
+                self.hiddens.append(
+                    None if self.hidden is None else
+                    (self.hidden[0].detach(), self.hidden[1].detach())
+                )
 
             mu, log_std, value, new_hidden = self.policy(
                 state_tensor,
                 prev_action_tensor,
+                observationCenters,
                 i_pulse_tensor,
                 self.hidden
             )
@@ -306,8 +364,15 @@ class PPOAgent(CognitiveAgent):
         center = action[0, 0].item()
         bandwidth = (action[0, 1].item() + 1) / 2
 
+        # Scan offsets between pulses when observation window is limited
+        offsets = action[0,2:]
+        self.currentScanOffsets = [
+            int(round(o.item() * (self.fftSize*4/5)))
+            for o in offsets
+        ]
+
         start, stop = CognitiveAgent.continuous_action_to_interval(
-            center, bandwidth, self.fftSize
+            center, bandwidth, self.fftSize, self.observationSize
         )
 
         if not eval_mode:
@@ -337,10 +402,11 @@ class PPOAgent(CognitiveAgent):
         # Stack rollout
         # ------------------------------------------------
         states = torch.cat(self.states, dim=0).to(device)          # (H, S, 1024)
-        actions = torch.cat(self.raw_actions, dim=0)                # (H, 2)
+        actions = torch.cat(self.raw_actions, dim=0)                # (H, 5)
         old_log_probs = torch.cat(self.log_probs, dim=0)            # (H)
         values = torch.cat(self.values, dim=0).squeeze(-1)          # (H)
-        prevActions = torch.cat(self.prevActions, dim=1)            # (H,2)
+        prevActions = torch.cat(self.prevActions, dim=0).squeeze(1)            # (H,5)
+        observationCenters = torch.cat(self.observationCenters, dim=0).to(device)
         cpiIndices  = torch.cat(self.cpiIndices, dim=1)   # (H, 1)
         
         rewards = torch.tensor(self.rewards, dtype=torch.float32, device=device)
@@ -352,11 +418,12 @@ class PPOAgent(CognitiveAgent):
         with torch.no_grad():
 
             last_state = states[-1:].unsqueeze(0)  # (1,1,S,1024)
-            last_prevAction = prevActions[-1,-1, :].unsqueeze(0).unsqueeze(0)  # (1,1,2)
+            last_prevAction = prevActions[-1].view(1,1,2+self.observationCenterCount)
+            last_observationCenters = observationCenters[-1:].unsqueeze(0)
             last_cpiIndex = cpiIndices[-1,-1, :].unsqueeze(0).unsqueeze(0)  # (1,1,1)
             last_hidden = self.hiddens[-1]
 
-            _, _, next_value, _ = self.policy(last_state, last_prevAction, last_cpiIndex, last_hidden)
+            _, _, next_value, _ = self.policy(last_state, last_prevAction, last_observationCenters, last_cpiIndex, last_hidden)
             next_value = next_value[:, -1].squeeze(-1)
 
         # ------------------------------------------------
@@ -391,6 +458,7 @@ class PPOAgent(CognitiveAgent):
         advantages = advantages[:usable]
         returns = returns[:usable]
         prevActions = prevActions[:usable]
+        observationCenters = observationCenters[:usable]
         cpiIndices  = cpiIndices[:usable].view(num_seq, seq_len, -1)   # (N,T,1)
         
         states = states.view(num_seq, seq_len, *states.shape[1:])      # (N,T,S,1024)
@@ -399,6 +467,7 @@ class PPOAgent(CognitiveAgent):
         advantages = advantages.view(num_seq, seq_len)
         returns = returns.view(num_seq, seq_len)
         prevActions = prevActions.view(num_seq, seq_len, -1)           # (N,T,2)
+        observationCenters = observationCenters.view(num_seq, seq_len, observationCenters.shape[1], observationCenters.shape[2])
         cpiIndices = cpiIndices.view(num_seq, seq_len, -1)           # (N,T,2)
 
         # ------------------------------------------------
@@ -420,12 +489,14 @@ class PPOAgent(CognitiveAgent):
                 adv_batch = advantages[idx].to(device)
                 return_batch = returns[idx].to(device)
                 prev_batch = prevActions[idx].to(device)
+                observationCenters_batch = observationCenters[idx].to(device)
                 cpiIndices_batch = cpiIndices[idx].to(device)
                 hidden = None
 
                 mu, log_std, value_pred, _ = self.policy(
                     state_batch,
                     prev_batch,
+                    observationCenters_batch,
                     cpiIndices_batch,
                     hidden
                 )
@@ -492,6 +563,7 @@ class PPOAgent(CognitiveAgent):
         self.dones.clear()
         self.hiddens.clear()
         self.prevActions.clear()
+        self.observationCenters.clear()
         self.cpiIndices.clear()
 
     def save(self, path):

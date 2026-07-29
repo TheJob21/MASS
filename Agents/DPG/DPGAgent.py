@@ -72,6 +72,7 @@ class DPGAgent(CognitiveAgent):
     def __init__(
         self,
         fftSize=1024,
+        observationSize=300,
         device="cpu",
         gamma=0.99,
         tau=0.005,
@@ -84,7 +85,6 @@ class DPGAgent(CognitiveAgent):
     ):
         super().__init__(fftSize=fftSize, cpiLen=cpiLen)
         self.device = device
-        self.fftSize = fftSize
         self.max_bw = max_bw
 
         self.gamma = gamma
@@ -92,13 +92,13 @@ class DPGAgent(CognitiveAgent):
         self.batch_size = batch_size
         self.noise_std = noise_std
 
-        self.state_dim = fftSize
+        self.observationSize = observationSize
 
-        self.actor = Actor(self.state_dim).to(device)
-        self.actor_target = Actor(self.state_dim).to(device)
+        self.actor = Actor(self.observationSize).to(device)
+        self.actor_target = Actor(self.observationSize).to(device)
 
-        self.critic = Critic(self.state_dim).to(device)
-        self.critic_target = Critic(self.state_dim).to(device)
+        self.critic = Critic(self.observationSize).to(device)
+        self.critic_target = Critic(self.observationSize).to(device)
 
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.critic_target.load_state_dict(self.critic.state_dict())
@@ -128,7 +128,7 @@ class DPGAgent(CognitiveAgent):
 
         action = np.clip(action,-1,1)
 
-        start, stop = CognitiveAgent.continuous_action_to_interval(action[0], action[1], self.fftSize)
+        start, stop = CognitiveAgent.continuous_action_to_interval(action[0], action[1], self.fftSize, self.observationSize)
 
         self.currentAction = (start, stop)
         self.lastAction = action

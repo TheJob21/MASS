@@ -6,16 +6,16 @@ import numpy as np
 from Agents.CognitiveAgent import CognitiveAgent
 
 class DQNAgent(CognitiveAgent):
-    def __init__(self, actionList, currentAction=None, fftSize=1024, seed=0, cpiLen=256, device="cpu",
+    def __init__(self, actionList, currentAction=None, fftSize=1024, observationSize=300, seed=0, cpiLen=256, iterationsPerPulse=20, scanOffsetCount=3, device="cpu",
                  epsilon=1.0, gamma=0.9, lr=1e-4, batch_size=32):
-        super().__init__(currentAction, fftSize, cpiLen)
+        super().__init__(currentAction=currentAction, fftSize=fftSize, cpiLen=cpiLen, iterationsPerPulse=iterationsPerPulse, observationCenterCount=scanOffsetCount)
         
         self.DQN_ACTIONS = actionList
         self.lr = lr
         self.device = device
 
-        self.policy = SpectrumDQN(fftSize, len(actionList)).to(device)
-        self.target = SpectrumDQN(fftSize, len(actionList)).to(device)
+        self.policy = SpectrumDQN(observationSize, len(actionList)).to(device)
+        self.target = SpectrumDQN(observationSize, len(actionList)).to(device)
         self.target.load_state_dict(self.policy.state_dict())
 
         self.buffer = ReplayBuffer()
@@ -28,50 +28,155 @@ class DQNAgent(CognitiveAgent):
         self.batch_size=batch_size
         self.state_t = None
         self.action_idx = None
+        self.observationCenters_t = None
         self.rng = np.random.default_rng(seed)
 
-    def selectAction(self, state_seq, eval_mode):
-        self.state_t = state_seq[-1].astype(np.float32)
-        if eval_mode:
-            with torch.no_grad():
-                q = self.policy(torch.tensor(self.state_t, dtype=torch.float32).unsqueeze(0))
-                self.action_idx = q.argmax(dim=1).item()
-                interval = self.DQN_ACTIONS[self.action_idx]
-                self.currentAction = interval
+    # def selectAction(self, state_seq, eval_mode):
+    #     self.state_t = state_seq[-1].astype(np.float32)
+    #     if eval_mode:
+    #         with torch.no_grad():
+    #             q = self.policy(torch.tensor(self.state_t, dtype=torch.float32).unsqueeze(0))
+    #             self.action_idx = q.argmax(dim=1).item()
+    #             interval = self.DQN_ACTIONS[self.action_idx]
+    #             self.currentAction = interval
         
-        if self.rng == None:
-            if np.random.rand() < self.epsilon:
-                self.action_idx = np.random.randint(len(self.DQN_ACTIONS))
-                interval = self.DQN_ACTIONS[self.action_idx]
-                self.currentAction = interval
-        elif self.rng.random() < self.epsilon:
-            self.action_idx = self.rng.integers(len(self.DQN_ACTIONS))
-            interval = self.DQN_ACTIONS[self.action_idx]
-            self.currentAction = interval
+    #     if self.rng == None:
+    #         if np.random.rand() < self.epsilon:
+    #             self.action_idx = np.random.randint(len(self.DQN_ACTIONS))
+    #             interval = self.DQN_ACTIONS[self.action_idx]
+    #             self.currentAction = interval
+    #     elif self.rng.random() < self.epsilon:
+    #         self.action_idx = self.rng.integers(len(self.DQN_ACTIONS))
+    #         interval = self.DQN_ACTIONS[self.action_idx]
+    #         self.currentAction = interval
 
-        with torch.no_grad():
-            q = self.policy(torch.tensor(self.state_t).unsqueeze(0))
-            self.action_idx = q.argmax().item()
-            interval = self.DQN_ACTIONS[self.action_idx]
-            self.currentAction = interval
+    #     with torch.no_grad():
+    #         q = self.policy(torch.tensor(self.state_t).unsqueeze(0))
+    #         self.action_idx = q.argmax().item()
+    #         interval = self.DQN_ACTIONS[self.action_idx]
+    #         self.currentAction = interval
+
+    def selectAction(self, state_seq, eval_mode):
+
+        state_np = np.stack(state_seq).astype(np.float32)
+        num_snapshots = len(state_np)
+
+        observationCenters = self.getObservationCenters(num_snapshots)
+
+        self.state_t = state_np
+        self.observationCenters_t = np.asarray(
+            observationCenters,
+            dtype=np.float32
+        )
+
+        state_tensor = torch.tensor(
+            self.state_t,
+            dtype=torch.float32,
+            device=self.device
+        ).unsqueeze(0)
+
+        center_tensor = torch.tensor(
+            self.observationCenters_t,
+            dtype=torch.float32,
+            device=self.device
+        ).view(1, num_snapshots, 1)
+
+        # ε-greedy action selection
+        if (not eval_mode) and (self.rng.random() < self.epsilon):
+
+            self.action_idx = self.rng.integers(
+                len(self.DQN_ACTIONS)
+            )
+
+        else:
+
+            with torch.no_grad():
+
+                q = self.policy(
+                    state_tensor,
+                    center_tensor
+                )
+
+                self.action_idx = q.argmax(dim=1).item()
+
+        # --------------------------------------------------
+        # Decode chosen action
+        # --------------------------------------------------
+
+        start, stop, obs_centers = self.DQN_ACTIONS[self.action_idx]
+
+        self.currentAction = (start, stop)
+
+        tx_center = (start + stop) // 2
+
+        self.currentScanOffsets = [
+            int(c - tx_center)
+            for c in obs_centers
+        ]
+
+    # def train_step(self):
+    #     if len(self.buffer) < self.batch_size:
+    #         return
+
+    #     s, a, r, s2, d = self.buffer.sample(self.batch_size, rng=self.rng)
+
+    #     q = self.policy(s).gather(1, a.unsqueeze(1)).squeeze()
+    #     with torch.no_grad():
+    #         q_next = self.target(s2).max(1)[0]
+    #         target = r + self.gamma * q_next * (1 - d)
+
+    #     loss = nn.MSELoss()(q, target)
+    #     self.optimizer.zero_grad()
+    #     loss.backward()
+    #     self.optimizer.step()
+
+    #     self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
 
     def train_step(self):
+
         if len(self.buffer) < self.batch_size:
             return
 
-        s, a, r, s2, d = self.buffer.sample(self.batch_size, rng=self.rng)
+        (
+            s,
+            centers,
+            a,
+            r,
+            s2,
+            centers2,
+            d
+        ) = self.buffer.sample(
+            self.batch_size,
+            rng=self.rng
+        )
 
-        q = self.policy(s).gather(1, a.unsqueeze(1)).squeeze()
+        q = self.policy(
+            s,
+            centers
+        ).gather(
+            1,
+            a.unsqueeze(1)
+        ).squeeze()
+
         with torch.no_grad():
-            q_next = self.target(s2).max(1)[0]
+
+            q_next = self.target(
+                s2,
+                centers2
+            ).max(1)[0]
+
             target = r + self.gamma * q_next * (1 - d)
 
         loss = nn.MSELoss()(q, target)
+
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
 
-        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
+        self.epsilon = max(
+            self.epsilon_min,
+            self.epsilon * self.epsilon_decay
+        )
 
     def save(self, path):
 

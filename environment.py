@@ -5,6 +5,7 @@ import colorsys
 import torch
 import numpy as np
 import pandas as pd
+import itertools
 from Agents.Control.StaticAgent import StaticAgent
 from Agents.Control.StaticAgent import StaticType
 from Agents.Control.SAAAgent import SAAAgent
@@ -46,6 +47,47 @@ class Environment:
             previousState[exec_start:exec_stop] = True
             
         return previousState
+    
+    def get_observation_window(self, state, agent, offset_idx, observation_size):
+        """
+        Returns a fixed-size observation window centered on center_bin.
+
+        Parameters
+        ----------
+        state : np.ndarray
+            Full occupancy state.
+        center_bin : int
+            Center of the observation.
+        observation_size : int
+            Number of bins in the observation.
+
+        Returns
+        -------
+        np.ndarray
+            Observation window of length observation_size.
+        """
+
+        fftSize = len(state)
+        
+        center_norm = agent.currentObservationCenters[offset_idx]
+        center_bin = agent.normalizedToBin(center_norm)
+
+        half = observation_size // 2
+
+        start = center_bin - half
+        stop = start + observation_size
+
+        # Shift window if it extends below 0
+        if start < 0:
+            stop -= start
+            start = 0
+
+        # Shift window if it extends beyond the FFT
+        if stop > fftSize:
+            start -= (stop - fftSize)
+            stop = fftSize
+
+        return state[start:stop].copy()
 
     # Returns action corresponding to longest deadspace of previous state bandwidth
     def getLargestDeadSpaceInterval(self, prevState):
@@ -67,7 +109,87 @@ class Environment:
 
         return int(starts[idx]), int(ends[idx])
 
+    def build_observation_state(
+        self,
+        staticState,
+        listOfAgents,
+        iteration,
+        iterationsInPulse,
+        agentStartIndices
+    ):
+        fftSize = self.cfg.FFT_SIZE
 
+        # Label map (0 = nothing)
+        state = np.zeros(fftSize, dtype=np.int16)
+        alpha_mask = np.zeros(fftSize, dtype=float)
+
+        state[staticState] = 1
+        alpha_mask[staticState] = 1.0
+
+        for idx, agent in enumerate(listOfAgents):
+
+            if agent.currentAction is None:
+                continue
+
+            agent_label = idx + 2
+
+            # Observation window
+            if (
+                self.cfg.LIMIT_OBSERVATION
+                and hasattr(agent, "currentScanOffsets")
+            ):
+
+                snapshot_idx = (
+                    iteration - agentStartIndices[idx]
+                ) % iterationsInPulse
+
+                offset_idx = min(
+                    snapshot_idx * agent.        observationCenterCount
+                    // iterationsInPulse,
+                    agent.        observationCenterCount - 1
+                )
+
+                tx_center = (
+                    agent.currentAction[0]
+                    + agent.currentAction[1]
+                ) // 2
+
+                obs_center = agent.currentScanOffsets[offset_idx]
+                obs_center_bin = agent.normalizedToBin(obs_center)
+                half = self.cfg.OBSERVATION_BIN_SIZE // 2
+
+                left = obs_center_bin - half
+                right = left + self.cfg.OBSERVATION_BIN_SIZE
+                
+                if left < 0:
+                    right -= left
+                    left = 0
+
+                # Shift window if it extends beyond the FFT
+                if right > fftSize:
+                    left -= (right - fftSize)
+                    right = fftSize
+
+                # Don't overwrite transmissions already drawn
+                observe = alpha_mask[left:right] < 1.0
+
+                state[left:right][observe] = agent_label
+                alpha_mask[left:right][observe] = 0.30
+
+            # -------------------------------------------------
+            # Transmission
+            # -------------------------------------------------
+            if agent.isTransmitting:
+
+                s, e = agent.currentAction
+
+                s = max(0, s)
+                e = min(fftSize, e)
+
+                state[s:e] = agent_label
+                alpha_mask[s:e] = 1.0
+
+        return state, alpha_mask
 
     def build_labeled_state(
         self,
@@ -412,6 +534,7 @@ class Environment:
         occupiedBwPerIteration = []
         spectrumSampleSize=30_000
         allStates = []
+        observationStates = []
         deadspace = [] # MHz
         staticAgentRNG = np.random.default_rng(self.cfg.SEED)
         self.cfg.SEED += 1
@@ -424,7 +547,7 @@ class Environment:
         mfosSeed=self.cfg.SEED
         self.cfg.SEED += 1
         torch.Generator(device=self.cfg.DEVICE).manual_seed(self.cfg.SEED)
-
+            
 
         liveDataFilename = self.cfg.SPECTRUM_FILES[self.cfg.DATA_CHOICE]
         storedStateFile = self.cfg.STORED_STATE_MAP[liveDataFilename]
@@ -433,7 +556,7 @@ class Environment:
         if not self.cfg.SIM_MODE and not os.path.exists(storedStateFile) and not os.path.exists(liveDataFilename):
             print(f"Warning: files not found -> {storedStateFile} -> {liveDataFilename}")
             self.cfg.SIM_MODE = True
-
+        
         # If precomputed file exists, just load it
         if not self.cfg.SIM_MODE:
             if os.path.exists(storedStateFile):
@@ -513,8 +636,11 @@ class Environment:
                 "bptt_chunk": 16
             }
             
-            ppoAgents.append(PPOAgent(fftSize=self.cfg.FFT_SIZE, 
+            ppoAgents.append(PPOAgent(fftSize=self.cfg.FFT_SIZE,
+                                      observationSize=self.cfg.OBSERVATION_BIN_SIZE,
                                       cpiLen=self.cfg.CPI_LEN, 
+                                      iterationsPerPulse=iterationsInPulse,
+                                      scanOffsetCount=self.cfg.OBSERVATION_CENTER_COUNT,
                                       device=self.cfg.DEVICE,
                                       gamma=bestConfig.get("gamma"),
                                       lam=bestConfig.get("lam"),
@@ -531,13 +657,25 @@ class Environment:
         # DQN Agent Parameters
         BANDWIDTHS = [96, 128, 160] #[32, 64, 96]
         CENTERS = np.linspace(0, self.cfg.FFT_SIZE-1, 32, dtype=int)
+        observationCenterCount = (self.cfg.FFT_SIZE + self.cfg.OBSERVATION_BIN_SIZE - 1) // self.cfg.OBSERVATION_BIN_SIZE
+        OBSERVATION_CENTERS = np.linspace(
+            self.cfg.OBSERVATION_BIN_SIZE // 2,
+            self.cfg.FFT_SIZE - self.cfg.OBSERVATION_BIN_SIZE // 2,
+            observationCenterCount,
+            dtype=int
+        )
         DQN_ACTIONS = []
         for bw in BANDWIDTHS:
-            for c in CENTERS:
-                start = max(0, c - bw // 2)
-                stop  = min(self.cfg.FFT_SIZE, start + bw)
-                if stop - start == bw:
-                    DQN_ACTIONS.append((start, stop))
+            for tx_center in CENTERS:
+
+                start = max(0, tx_center - bw // 2)
+                stop = min(self.cfg.FFT_SIZE, start + bw)
+
+                if stop - start != bw:
+                    continue
+
+                for obs_centers in itertools.combinations_with_replacement(OBSERVATION_CENTERS, self.cfg.OBSERVATION_CENTER_COUNT):
+                    DQN_ACTIONS.append((start, stop, obs_centers))
         numDqnAgents = self.cfg.AGENTS['dqn']
         dqnAgents = []
         for dqnAgent in range(numDqnAgents):
@@ -551,8 +689,11 @@ class Environment:
             
             dqnAgents.append(DQNAgent(actionList=DQN_ACTIONS,
                             fftSize=self.cfg.FFT_SIZE,
+                            observationSize=self.cfg.OBSERVATION_BIN_SIZE,
                             seed=dqnSeed+dqnAgent,
                             cpiLen=self.cfg.CPI_LEN, 
+                            iterationsPerPulse=iterationsInPulse, 
+                            scanOffsetCount=self.cfg.OBSERVATION_CENTER_COUNT, 
                             device=self.cfg.DEVICE,
                             epsilon=bestConfig.get("epsilon"),
                             gamma=bestConfig.get("gamma"),
@@ -571,19 +712,24 @@ class Environment:
                 "gamma": 0.9509,
                 "exploration_center": 0.711,
                 "exploration_bw": 0.06077,
-                "entropy_coef": .00401
+                "exploration_obs": 0.2,
+                "entropy_coef_tx": .00401,
+                "entropy_coef_obs": .00401
             }
             # base_genome = None # Random Genomes
             mfosAgent = MFOSAgent(
                 population_size=5,
-                base_genome=base_genome,
+                base_genome=None,
                 mutation_scale=0.05,
                 elite_fraction=.4,
                 fresh_fraction=0.2,
                 seed=self.cfg.SEED + mfosAgentI, #42075 is good for random genomes and weights?
                 device=self.cfg.DEVICE,
                 fftSize=self.cfg.FFT_SIZE,
-                cpiLen=self.cfg.CPI_LEN
+                observationSize=self.cfg.OBSERVATION_BIN_SIZE,
+                cpiLen=self.cfg.CPI_LEN, 
+                iterationsPerPulse=iterationsInPulse,
+                observationCenterCount=self.cfg.OBSERVATION_CENTER_COUNT
             )
             mfosAgents.append(mfosAgent)
             startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
@@ -594,7 +740,7 @@ class Environment:
         numDpgAgents = self.cfg.AGENTS['dpg']
         dpgAgents = []
         for i in range(numDpgAgents):
-            dpgAgents.append(DPGAgent(fftSize=self.cfg.FFT_SIZE, device=self.cfg.DEVICE))
+            dpgAgents.append(DPGAgent(fftSize=self.cfg.FFT_SIZE, observationSize=self.cfg.OBSERVATION_BIN_SIZE, device=self.cfg.DEVICE))
             startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
             allCogAgentsStartIndices.append(startIndex)
             allCogAgents.append(dpgAgents[i])
@@ -608,13 +754,18 @@ class Environment:
                 "gamma": 0.9509,
                 "exploration_center": 0.711,
                 "exploration_bw": 0.06077,
-                "entropy_coef": .00401
+                "exploration_obs": 0.2,
+                "entropy_coef_tx": .00401,
+                "entropy_coef_obs": .00401
             }
             ablatedMfosAgent = AblatedMFOSAgent(
                 fftSize=self.cfg.FFT_SIZE,
-                cpiLen=self.cfg.CPI_LEN,
+                observationSize=self.cfg.OBSERVATION_BIN_SIZE,
+                cpiLen=self.cfg.CPI_LEN, 
+                iterationsPerPulse=iterationsInPulse,
+                observationCenterCount=self.cfg.OBSERVATION_CENTER_COUNT,
                 device=self.cfg.DEVICE,
-                genome=genome,
+                genome=None,
                 seed=self.cfg.SEED + mfosAgentI + 1 #42075 is good for random genomes and weights?
             )
             ablatedMFOSAgents.append(ablatedMfosAgent)
@@ -624,10 +775,6 @@ class Environment:
 
         if self.cfg.LOAD_CHECKPOINTS:
             load_agents(allCogAgents, self.cfg.CHECKPOINT_DIR, self.cfg.DEVICE)
-
-        lastPulseStates = []
-        for agent in allCogAgents:
-            lastPulseStates.append(deque(maxlen=iterationsInPulse))
 
         binOwnership = np.zeros(self.cfg.FFT_SIZE, dtype=np.int8) # 0=unowned, 1=staticOwner, 2+=cogUser
 
@@ -650,18 +797,29 @@ class Environment:
                 print(int(i/1000), "K iterations completed.")
             
             # store previous state space without the active agents action
-            for idx, _ in enumerate(allCogAgents):
+            for idx, agent in enumerate(allCogAgents):
                 prevStateWithoutAgent = staticState.copy()
                 if self.cfg.MULTI_AGENT:
                     for idx2, agent2 in enumerate(allCogAgents):
                         if idx != idx2 and agent2.isTransmitting:
                             prevStateWithoutAgent = self.updateStateInterval(prevStateWithoutAgent, agent2.currentAction)
-                lastPulseStates[idx].append(prevStateWithoutAgent)
+                if self.cfg.LIMIT_OBSERVATION:
+                    snapshot_idx = (
+                        i - allCogAgentsStartIndices[idx]
+                    ) % iterationsInPulse
+                    offset_idx = min(
+                        snapshot_idx * allCogAgents[idx].observationCenterCount // iterationsInPulse,
+                        allCogAgents[idx].observationCenterCount-1
+                    )
+                    observation = self.get_observation_window(prevStateWithoutAgent, allCogAgents[idx], offset_idx, self.cfg.OBSERVATION_BIN_SIZE)
+                    agent.lastPulseStates.append(observation)
+                else:
+                    agent.lastPulseStates.append(prevStateWithoutAgent)
 
             # Generate actions for agents
             for agentI, agent in enumerate(allCogAgents):
                 if i % iterationsInPulse == allCogAgentsStartIndices[agentI]: # every 204.8 usec
-                    agentStates = lastPulseStates[agentI]
+                    agentStates = agent.lastPulseStates
                     if len(agentStates) == iterationsInPulse:
                         agent.selectAction(state_seq=agentStates, eval_mode=self.cfg.EVAL_MODE)
                         agent.storeAction(agent.curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency))
@@ -674,8 +832,7 @@ class Environment:
             for staticAgent in staticAgents:
                 staticAgent.iterateCurrentAction(iteration=i)
             for j in range(numStaticAgents):
-                # Every 50_000 iterations, choose a new action
-                if ((staticAgents[j].staticType == StaticType.Fat or StaticType.Pulsed) and (j + 1) * 100_000 == i) or (staticAgents[j].staticType == StaticType.Skinny and (j + 1) * 30_000 == i):
+                if ((staticAgents[j].staticType == StaticType.Fat or staticAgents[j].staticType == StaticType.Pulsed) and (j + 1) * 100_000 == i) or (staticAgents[j].staticType == StaticType.Skinny and (j + 1) * 30_000 == i):
                     staticAgents[j].takeRandomAction()
             for staticAgent in staticAgents:
                 currentState = self.updateStateInterval(currentState, staticAgent.currentAction)
@@ -704,6 +861,13 @@ class Environment:
                     listOfAgents=allCogAgents,
                     binOwnership=binOwnership
                 ))
+                observationStates.append(self.build_observation_state(
+                    staticState=staticState,
+                    listOfAgents=allCogAgents,
+                    iteration=i,
+                    iterationsInPulse=iterationsInPulse,
+                    agentStartIndices=allCogAgentsStartIndices
+                ))
             deadSpaceInterval = self.getLargestDeadSpaceInterval(currentState)
             if deadSpaceInterval == None:
                 deadspace.append(0)
@@ -719,7 +883,7 @@ class Environment:
                 startingFrequency=startingFrequency
             )
             
-            if not self.cfg.EVAL_MODE and i > 0 and len(lastPulseStates) > 0 and len(lastPulseStates[0]) == iterationsInPulse: # every 204.8 usec
+            if not self.cfg.EVAL_MODE and i > 0 and len(allCogAgents) > 0 and len(allCogAgents[0].lastPulseStates) == iterationsInPulse: # every 204.8 usec
                 # Update PPO Agents
                 for ppoAgent in ppoAgents:
                     if len(ppoAgent.allRewards) > 0 and len(ppoAgent.pulseRewards) == 0:
@@ -731,11 +895,17 @@ class Environment:
                 # Update DQN Agents
                 for dqnAgent in dqnAgents:
                     if len(dqnAgent.allRewards) > 0 and len(dqnAgent.pulseRewards) == 0:
+
+                         # Calculate next observation centers from the next state
+                        nextObservationCenters = dqnAgent.getObservationCenters(iterationsInPulse)
+
                         dqnAgent.buffer.push(
                             dqnAgent.state_t,
+                            dqnAgent.observationCenters_t,
                             dqnAgent.action_idx,
                             dqnAgent.allRewards[-1],
-                            currentState.astype(np.float32),
+                            np.stack(dqnAgent.lastPulseStates).astype(np.float32),
+                            nextObservationCenters,
                             False
                         )
                         dqnAgent.train_step()
@@ -869,6 +1039,86 @@ class Environment:
 
         cbar.ax.set_yticklabels(tickLabels)
         plt.tight_layout()
+
+
+        # Agent Observation / Transmission Map
+        obs_states_list, obs_alphas_list = zip(*observationStates)
+
+        observationMatrix = np.stack(obs_states_list)
+        observationAlphaMatrix = np.stack(obs_alphas_list)
+
+        colorCount = (
+            numRandomStartAgents
+            + numSaaAgents
+            + numPpoAgents
+            + numDqnAgents
+            + numMfosAgents
+            + numDpgAgents
+            + numAblatedMfosAgents
+            + 2          # Free + Static
+        )
+
+        cmap = self.build_agent_colormap(colorCount)
+
+        bounds = list(range(colorCount + 1))
+        norm = BoundaryNorm(bounds, cmap.N)
+
+        ticks = [i + 0.5 for i in range(colorCount)]
+
+        plt.figure(figsize=(14, 14))
+
+        im = plt.imshow(
+            observationMatrix,
+            aspect="auto",
+            origin="lower",
+            cmap=cmap,
+            norm=norm,
+            alpha=observationAlphaMatrix
+        )
+
+        im.format_cursor_data = lambda _: ""
+
+        if self.cfg.SIM_MODE:
+            plt.xlabel("Frequency Bin (Simulated 2.4-2.5 GHz)")
+        else:
+            plt.xlabel(
+                "Frequency Bin (" + ("2.4-2.5"
+                    if liveDataFilename in (
+                        "./Data/spectrum_245ghz.dat",
+                        "./Data/union_spectrum_245ghz.dat"
+                    )
+                    else "2.59-2.69"
+                ) + " GHz)"
+            )
+
+        plt.ylabel(f"Time Step (1 time step = {timestep} usec)")
+        plt.title(
+            f"Agent Observation Windows and Transmissions "
+            f"(Last {spectrumSampleSize} time steps)"
+        )
+
+        cbar = plt.colorbar(ticks=ticks)
+
+        tickLabels = ["Empty", "Static Agents"]
+        for randomStartAgent in range(numRandomStartAgents):
+            tickLabels.append("Random Start Agent" + (f" {randomStartAgent+1}" if randomStartAgent > 0 else ""))
+        for saaAgent in range(numSaaAgents):
+            tickLabels.append("SAA" + (f" {saaAgent+1}" if saaAgent > 0 else ""))
+        for ppoAgent in range(numPpoAgents):
+            tickLabels.append("PPO" + (f" {ppoAgent+1}" if ppoAgent > 0 else ""))
+        for dqnAgent in range(numDqnAgents):
+            tickLabels.append("DQN" + (f" {dqnAgent+1}" if dqnAgent > 0 else ""))
+        for mfosAgent in range(numMfosAgents):
+            tickLabels.append("M-FOS" + (f" {mfosAgent+1}" if mfosAgent > 0 else ""))
+        for dpgAgent in range(numDpgAgents):
+            tickLabels.append("DPG" + (f" {dpgAgent+1}" if dpgAgent > 0 else ""))
+        for ablatedAgent in range(numAblatedMfosAgents):
+            tickLabels.append("Ablated M-FOS" + (f" {ablatedAgent+1}" if ablatedAgent > 0 else ""))
+
+        cbar.ax.set_yticklabels(tickLabels)
+
+        plt.tight_layout()
+
 
         # Initialize summary containers
         reward_summary, bw_summary, coll_summary, delta_bw_summary, delta_cf_summary = [], [], [], [], []
@@ -1122,7 +1372,6 @@ class Environment:
         self.cfg.SEED += 1
         torch.Generator(device=self.cfg.DEVICE).manual_seed(self.cfg.SEED)
 
-
         liveDataFilename = self.cfg.SPECTRUM_FILES[self.cfg.DATA_CHOICE]
         storedStateFile = self.cfg.STORED_STATE_MAP[liveDataFilename]
         startingFrequency = self.cfg.STARTING_FREQUENCY_MAP[storedStateFile]
@@ -1191,7 +1440,9 @@ class Environment:
             
             
             agent = PPOAgent(fftSize=self.cfg.FFT_SIZE, 
+                                      observationSize=self.cfg.OBSERVATION_BIN_SIZE,
                                       cpiLen=self.cfg.CPI_LEN, 
+                                        iterationsPerPulse=iterationsInPulse, 
                                       device=self.cfg.DEVICE,
                                       gamma=config.get("gamma"),
                                       lam=config.get("lam"),
@@ -1231,8 +1482,10 @@ class Environment:
             
             agent = DQNAgent(actionList=DQN_ACTIONS,
                             fftSize=self.cfg.FFT_SIZE,
+                            observationSize=self.cfg.OBSERVATION_BIN_SIZE,
                             seed=dqnSeed+dqnAgentI,
                             cpiLen=self.cfg.CPI_LEN, 
+                            iterationsPerPulse=iterationsInPulse, 
                             device=self.cfg.DEVICE,
                             epsilon=config.get("epsilon"),
                             gamma=config.get("gamma"),
@@ -1254,11 +1507,14 @@ class Environment:
                 "gamma": mfosRNG.uniform(0.9, 0.999),                        # uniform
                 "exploration_center": mfosRNG.uniform(0.01, 0.3),
                 "exploration_bw": mfosRNG.uniform(0.01, 0.2),
-                "entropy_coef": 10 ** mfosRNG.uniform(-4, -2)       
+                "entropy_coef_tx": 10 ** mfosRNG.uniform(-4, -2),
+                "entropy_coef_obs": 10 ** mfosRNG.uniform(-4, -2)
             }
             agent = AblatedMFOSAgent(
                 fftSize=self.cfg.FFT_SIZE,
-                cpiLen=self.cfg.CPI_LEN,
+                observationSize=self.cfg.OBSERVATION_BIN_SIZE,
+                cpiLen=self.cfg.CPI_LEN, 
+                iterationsPerPulse=iterationsInPulse,
                 device=self.cfg.DEVICE,
                 genome=config,
                 seed=mfosSeed + mfosAgentI #42075 is good for random genomes and weights?

@@ -1,4 +1,4 @@
 class Agent:   
     def __init__(self, currentAction=None, fftSize=1024):
-        self.currentAction = currentAction
+        self.currentAction = currentAction # (start_bin, stop_bin)
         self.fftSize = fftSize

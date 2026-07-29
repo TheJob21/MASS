@@ -1,8 +1,10 @@
 from Agents.Agent import Agent
 from abc import ABC, abstractmethod
+from collections import deque
+import numpy as np
 
 class CognitiveAgent(Agent, ABC):
-    def __init__(self, currentAction=None, fftSize=1024, cpiLen=256, iterationsPerPulse=20):
+    def __init__(self, currentAction=None, fftSize=1024, cpiLen=256, iterationsPerPulse=20, observationCenterCount=3):
         super().__init__(currentAction=currentAction, fftSize=fftSize)
         self.cpiLen = cpiLen
         self.allActions = [] # array of tuples (centerFreq (MHz), BW (MHz))
@@ -10,10 +12,13 @@ class CognitiveAgent(Agent, ABC):
         self.allRewards = [] # array of reward per pulse
         self.pulseRewards = [] # array of rewards in current pulse
         self.iterationsPerPulse = iterationsPerPulse
+        self.lastPulseStates = deque(maxlen=iterationsPerPulse)
         self.sumCenterFreqForCPI = 0
         self.sumBwForCPI = 0
         self.isTransmitting = False
         self.cpiIndex = 0
+        self.observationCenterCount = observationCenterCount
+        self.currentObservationCenters = [0] * observationCenterCount # Stored as normalized values between (-1, 1)
 
     @abstractmethod
     def selectAction(self, state_seq, eval_mode):
@@ -76,7 +81,7 @@ class CognitiveAgent(Agent, ABC):
     
     # Utility: Continuous → Interval
     @staticmethod   
-    def continuous_action_to_interval(center, bandwidth, fftSize=1024):
+    def continuous_action_to_interval(center, bandwidth, fftSize=1024, bandwidthMax=1024):
         """
         center ∈ [-1, 1]
         bandwidth ∈ [0, 1]  (but we do not enforce it)
@@ -86,7 +91,7 @@ class CognitiveAgent(Agent, ABC):
         """
 
         # --- Convert bandwidth to bins (no clipping) ---
-        bw_bins = int(round(bandwidth * fftSize))
+        bw_bins = int(round(bandwidth * bandwidthMax))
         bw_bins = max(bw_bins, 102) # min 10 MHz
 
         # --- Convert center to bin index (no clipping) ---
@@ -99,3 +104,19 @@ class CognitiveAgent(Agent, ABC):
         stop = start + bw_bins
 
         return start, stop
+    
+    def getObservationCenters(self, num_snapshots):
+        observation_centers = []
+
+        for snapshot_idx in range(num_snapshots):
+            idx = min(
+                snapshot_idx * self.observationCenterCount // num_snapshots,
+                self.observationCenterCount - 1
+            )
+
+            observation_centers.append(self.currentObservationCenters[idx])
+
+        return np.asarray(observation_centers, dtype=np.float32)
+    
+    def normalizedToBin(self, normalizedVal):
+        return int(round((normalizedVal + 1.0) * 0.5 * (self.fftSize - 1)))

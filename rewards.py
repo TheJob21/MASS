@@ -85,34 +85,34 @@ class Rewards():
                     rewardAdapt = (config.REWARD['bandwidth_distortion'] * deltaBW / channelBandwidth) + (config.REWARD['center_distortion'] * deltaCenterFreq / channelBandwidth)
 
                     reward = rewardSpectrum - rewardAdapt
-                else: # Listening but not transmitting
-                    left_overflow = max(0, -raw_start)
-                    right_overflow = max(0, raw_stop - fftSize)
-                    overflow_bins = left_overflow + right_overflow
+                # else: # Listening but not transmitting
+                #     left_overflow = max(0, -raw_start)
+                #     right_overflow = max(0, raw_stop - fftSize)
+                #     overflow_bins = left_overflow + right_overflow
                     
-                    exec_start = max(0, raw_start)
-                    exec_stop = min(fftSize, raw_stop)
+                #     exec_start = max(0, raw_start)
+                #     exec_stop = min(fftSize, raw_stop)
                     
-                    ownership_slice = binOwnership[exec_start:exec_stop]
+                #     ownership_slice = binOwnership[exec_start:exec_stop]
 
-                    total_bins = exec_stop - exec_start
-                    if config.MULTI_AGENT:
-                        owned_mask = (ownership_slice == agent_id)
-                        owned_bins = np.sum(owned_mask)
+                #     total_bins = exec_stop - exec_start
+                #     if config.MULTI_AGENT:
+                #         owned_mask = (ownership_slice == agent_id)
+                #         owned_bins = np.sum(owned_mask)
 
-                        collision_bins = total_bins - owned_bins
-                    else:
-                        # Only static causes collision
-                        collision_mask = (ownership_slice == 1)
+                #         collision_bins = total_bins - owned_bins
+                #     else:
+                #         # Only static causes collision
+                #         collision_mask = (ownership_slice == 1)
 
-                        collision_bins = np.sum(collision_mask)
-                    # Add overflow as collision
-                    collision_bins += overflow_bins
+                #         collision_bins = np.sum(collision_mask)
+                #     # Add overflow as collision
+                #     collision_bins += overflow_bins
                     
-                    collisionFrac = (collision_bins * binSize) / channelBandwidth
+                #     collisionFrac = (collision_bins * binSize) / channelBandwidth
                     
                     
                     
-                    reward -= (collisionFrac * (config.REWARD['collision_weight'] / 30))
+                #     reward -= (collisionFrac * (config.REWARD['collision_weight'] / 30))
 
             cogAgent.storeReward(reward)
