@@ -594,13 +594,13 @@ class Environment:
         numRectangleAgents = self.cfg.AGENTS['static']['rectangular'] # pw = 50, interval = 10 -250,  60-680 bins
         numStaticAgents = numLargeAgents + numSkinnyAgents + numPulsedAgents + numRectangleAgents
         for staticAgent in range(numLargeAgents):
-            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Fat))
+            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Fat, agentTypeIndex=staticAgent))
         for staticAgent in range(numSkinnyAgents):
-            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Skinny))
+            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Skinny, agentTypeIndex=staticAgent))
         for staticAgent in range(numPulsedAgents):
-            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Pulsed))
+            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Pulsed, agentTypeIndex=staticAgent))
         for staticAgent in range(numRectangleAgents):
-            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Rectangular))
+            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Rectangular, agentTypeIndex=staticAgent))
 
         # Random Single Action Agent
         numRandomStartAgents = self.cfg.AGENTS['random_start']
@@ -826,15 +826,11 @@ class Environment:
                 elif i % iterationsInPulse == ((allCogAgentsStartIndices[agentI]+1) % iterationsInPulse): # Pulse lasts one iteration, then listens for PRI duration
                     allCogAgents[agentI].isTransmitting = False         
 
-                    
+
             # Static Agent Actions. Simulate frequency changes
             currentState = self.initState()
             for staticAgent in staticAgents:
-                staticAgent.iterateCurrentAction(iteration=i)
-            for j in range(numStaticAgents):
-                if ((staticAgents[j].staticType == StaticType.Fat or staticAgents[j].staticType == StaticType.Pulsed) and (j + 1) * 100_000 == i) or (staticAgents[j].staticType == StaticType.Skinny and (j + 1) * 30_000 == i):
-                    staticAgents[j].takeRandomAction()
-            for staticAgent in staticAgents:
+                staticAgent.iterateCurrentAction()
                 currentState = self.updateStateInterval(currentState, staticAgent.currentAction)
             
             if self.cfg.SIM_MODE == False: # Use Live Data
@@ -1415,13 +1411,13 @@ class Environment:
         numRectangleAgents = self.cfg.AGENTS['static']['rectangular'] # pw = 50, interval = 10 -250,  60-680 bins
         numStaticAgents = numLargeAgents + numSkinnyAgents + numPulsedAgents + numRectangleAgents
         for staticAgent in range(numLargeAgents):
-            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Fat))
+            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Fat, agentTypeIndex=staticAgent))
         for staticAgent in range(numSkinnyAgents):
-            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Skinny))
+            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Skinny, agentTypeIndex=staticAgent))
         for staticAgent in range(numPulsedAgents):
-            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Pulsed))
+            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Pulsed, agentTypeIndex=staticAgent))
         for staticAgent in range(numRectangleAgents):
-            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Rectangular))
+            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Rectangular, agentTypeIndex=staticAgent))
 
         # PPO Agent Parameters
         numPpoAgents = 0 #self.cfg.AGENTS['ppo'] # Proximal Policy Optimization
@@ -1625,18 +1621,12 @@ class Environment:
                 elif i % iterationsInPulse == 1: # Pulse lasts one iteration, then listens for PRI duration
                     agent.isTransmitting = False   
 
-                    
             # Static Agent Actions. Simulate frequency changes
             currentState = self.initState()
             for staticAgent in staticAgents:
-                staticAgent.iterateCurrentAction(iteration=i)
-            for j in range(numStaticAgents):
-                # Every 50_000 iterations, choose a new action
-                if ((staticAgents[j].staticType == StaticType.Fat or StaticType.Pulsed) and (j + 1) * 100_000 == i) or (staticAgents[j].staticType == StaticType.Skinny and (j + 1) * 30_000 == i):
-                    staticAgents[j].takeRandomAction()
-            for staticAgent in staticAgents:
+                staticAgent.iterateCurrentAction()
                 currentState = self.updateStateInterval(currentState, staticAgent.currentAction)
-            
+
             if self.cfg.SIM_MODE == False: # Use Live Data
                 currentState = currentState | liveData[i%len(liveData)]
                 
