@@ -81,9 +81,10 @@ class DPGAgent(CognitiveAgent):
         batch_size=64,
         max_bw=128,
         noise_std=0.1,
-        cpiLen=256
+        cpiLen=256,
+        startIndex=0
     ):
-        super().__init__(fftSize=fftSize, cpiLen=cpiLen)
+        super().__init__(fftSize=fftSize, cpiLen=cpiLen, startIndex=startIndex)
         self.device = device
         self.max_bw = max_bw
 
@@ -112,10 +113,10 @@ class DPGAgent(CognitiveAgent):
         # simulator compatibility
         self.lastAction = None
 
-    def selectAction(self, state_seq, eval_mode):
-        self.state_t = state_seq[-1].astype(np.float32)
+    def selectAction(self, eval_mode):
+        self.state_t = self.lastPulseStates[-1].astype(np.float32)
         
-        obs_seq_np = np.stack(state_seq)
+        obs_seq_np = np.stack(self.lastPulseStates)
         state = obs_seq_np[-1].astype(np.float32)
 
         state_t = torch.tensor(state).to(self.device).unsqueeze(0)
@@ -128,7 +129,7 @@ class DPGAgent(CognitiveAgent):
 
         action = np.clip(action,-1,1)
 
-        start, stop = CognitiveAgent.continuous_action_to_interval(action[0], action[1], self.fftSize, self.observationSize)
+        start, stop = self.continuous_action_to_interval(center=action[0], bandwidth=action[1], bandwidthMax=self.observationSize)
 
         self.currentAction = (start, stop)
         self.lastAction = action

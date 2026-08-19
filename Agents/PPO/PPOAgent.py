@@ -194,9 +194,10 @@ class PPOAgent(CognitiveAgent):
         entropy_decay=0.995,
         entropy_min=0.002,
         horizon=1024,
-        seed=None
+        seed=None, 
+        startIndex=0
     ):
-        super().__init__(currentAction=currentAction, fftSize=fftSize, cpiLen=cpiLen, iterationsPerPulse=iterationsPerPulse, observationCenterCount=scanOffsetCount)
+        super().__init__(currentAction=currentAction, fftSize=fftSize, cpiLen=cpiLen, iterationsPerPulse=iterationsPerPulse, observationCenterCount=scanOffsetCount, startIndex=startIndex)
 
         # Initialize Weights of Critic
         self.torchRng = torch.Generator(device=device)
@@ -258,11 +259,11 @@ class PPOAgent(CognitiveAgent):
     def resetHidden(self):
         self.hidden = None
 
-    def selectAction(self, state_seq, eval_mode):
+    def selectAction(self, eval_mode):
         """
         state_seq_np: (samples_per_pulse, 1024)
         """
-        state_seq_np = np.stack(state_seq)
+        state_seq_np = np.stack(self.lastPulseStates)
 
         num_snapshots = len(state_seq_np)
 
@@ -371,8 +372,8 @@ class PPOAgent(CognitiveAgent):
             for o in offsets
         ]
 
-        start, stop = CognitiveAgent.continuous_action_to_interval(
-            center, bandwidth, self.fftSize, self.observationSize
+        start, stop = self.continuous_action_to_interval(
+            center=center, bandwidth=bandwidth, bandwidthMax=self.observationSize
         )
 
         if not eval_mode:

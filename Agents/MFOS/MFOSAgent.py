@@ -25,7 +25,6 @@ class RNN(nn.Module):
 
         self.device = device
         self.fftSize = fftSize
-        self.observationSize = observationSize
         self.hidden_dim = hidden_dim
         self.action_dim = action_dim
         self.observ_dim = observ_dim
@@ -35,7 +34,7 @@ class RNN(nn.Module):
         if self.seed is not None:
             self.torch_rng.manual_seed(self.seed)
 
-        self._build_inner_policy()
+        self._build_inner_policy(observationSize=observationSize)
 
         self.hidden = None
         self.tx_log_probs = []
@@ -50,23 +49,20 @@ class RNN(nn.Module):
         self.cpiIndices = []
 
     # Build RNN policy from genome
-    def _build_inner_policy(self):
+    def _build_inner_policy(self, observationSize=300):
         state = torch.random.get_rng_state()
         torch.manual_seed(self.seed)
 
         # Observation embedding
         self.embedding = nn.Linear(
-            self.observationSize,
+            observationSize,
             self.hidden_dim
         )
-
-        # Observation-center embedding
-        self.center_embedding = nn.Linear(1, self.hidden_dim)
 
 
         # Temporal model
         self.gru = nn.GRU(
-            input_size=self.hidden_dim,
+            input_size=self.hidden_dim+1,
             hidden_size=256,
             num_layers=2,
             batch_first=True
@@ -84,10 +80,6 @@ class RNN(nn.Module):
         # Initialization
         nn.init.xavier_uniform_(self.embedding.weight)
         nn.init.zeros_(self.embedding.bias)
-
-
-        nn.init.xavier_uniform_(self.center_embedding.weight)
-        nn.init.zeros_(self.center_embedding.bias)
 
         for name, p in self.gru.named_parameters():
             if "weight_ih" in name:
@@ -129,68 +121,13 @@ class RNN(nn.Module):
         )
 
         torch.random.set_rng_state(state)
-        # CNN Encoder (frequency domain feature extractor)
-        # self.encoder = nn.Sequential(
-        #     nn.Conv1d(1, 16, kernel_size=7, stride=2, padding=3),
-        #     nn.ReLU(),
-        #     nn.Conv1d(16, 32, kernel_size=5, stride=2, padding=2),
-        #     nn.ReLU(),
-        #     nn.Conv1d(32, 64, kernel_size=3, stride=2, padding=1),
-        #     nn.ReLU()
-        # )
-
-        # # Compute encoded size after convs
-        # dummy = torch.zeros(1, 1, self.observationSize)
-        # with torch.no_grad():
-        #     dummy_out = self.encoder(dummy)
-        # conv_out_size = dummy_out.view(1, -1).shape[1]
-
-        # # Projection layer (reduce dimensionality)
-        # self.proj = nn.Linear(conv_out_size, 128)
-
-        # GRU (temporal modeling)
-        # self.gru = nn.GRU(
-        #     input_size=129,#pooled_bins,
-        #     hidden_size=256,  # alternate 256
-        #     num_layers=2, # alternate 2
-        #     batch_first=True
-        # )
-
-        # self.actor_hidden = nn.Linear(256 + 3, 128) # alternate 256+3
-        # self.actor = nn.Linear(128, self.action_dim)
-
-        # self.to(self.device)
-
-        # for name, p in self.named_parameters():
-        #     if "encoder" in name and "weight" in name:
-        #         nn.init.kaiming_uniform_(p, nonlinearity="relu")
-        #     elif "proj.weight" in name:
-        #         nn.init.xavier_uniform_(p)
-        #     elif "gru.weight_ih" in name:
-        #         nn.init.xavier_uniform_(p)
-        #     elif "gru.weight_hh" in name:
-        #         nn.init.orthogonal_(p)
-        #     elif "actor_hidden.weight" in name:
-        #         nn.init.kaiming_uniform_(p, nonlinearity="relu")
-        #     elif "actor.weight" in name:
-        #         nn.init.normal_(p, mean=0.0, std=0.01)
-        #     elif "bias" in name:
-        #         nn.init.constant_(p, 0.0)
-
-        # self.optimizer = torch.optim.Adam(
-        #     self.parameters(),
-        #     lr=self.genome["lr"]
-        # )
-        # torch.random.set_rng_state(state)
 
     def forward(self, pulse_seq_batch, observation_centers, prevAction, cpiIndices, hidden=None):
         # (B,T,observation_bin_size)
         x = torch.relu(self.embedding(pulse_seq_batch))
 
-        center_embed = self.center_embedding(observation_centers)
-
         # Fuse observation with its FFT location
-        x = x + center_embed
+        x = torch.cat([x, observation_centers], dim=-1)
 
         out, hidden = self.gru(x, hidden)
 
@@ -216,51 +153,6 @@ class RNN(nn.Module):
         obs_action = self.obs_actor(obs_hidden)
 
         return tx_action_raw, obs_action, hidden
-
-        # # pulse_seq_batch: (1, T, observation_bin_size)
-        # B, T, F = pulse_seq_batch.shape
-
-        # x = pulse_seq_batch.unsqueeze(2)           # (B, T, 1, F)
-        # x = x.view(B * T, 1, F)            # (B*T, 1, F)
-
-        # x = self.encoder(x)                # (B*T, C, L)
-        # x = x.view(B * T, -1)              # flatten
-
-        # x = self.proj(x)                   # (B*T, 128)
-        # x = x.view(B, T, -1)               # (B, T, 128)
-
-        # # append observation center
-        # x = torch.cat(
-        #     [x, observation_centers],
-        #     dim=-1
-        # )
-
-        # out, hidden = self.gru(x, hidden)      # (1,T,256)
-
-        # # pooled, _ = torch.max(out, dim=1)      # (1,256)
-        # pooled = out[:, -1, :]
-        # # pooled = torch.mean(out, dim=1)
-
-        # actorInput = torch.cat([pooled, prevActions, cpiIndices], dim=-1)
-        
-        # x = torch.relu(self.actor_hidden(actorInput))
-        
-        # action_raw = self.actor(x)
-
-        # center = torch.tanh(action_raw[:, 0])
-        # bandwidth = torch.sigmoid(action_raw[:, 1])
-        # obs_offsets = torch.tanh(action_raw[:, 2:])
-
-        # action = torch.cat(
-        #     [
-        #         center.unsqueeze(1),
-        #         bandwidth.unsqueeze(1),
-        #         obs_offsets
-        #     ],
-        #     dim=1
-        # )
-
-        # return action, hidden
     
 
     def select_action(self, state_seq_np, observation_centers, normalizedCpiIndex, eval=False):
@@ -278,7 +170,7 @@ class RNN(nn.Module):
         
         if self.currentAction is not None:
             prev_action_tensor = torch.as_tensor(
-                [self.currentAction[0] / self.fftSize, self.currentAction[1] / self.fftSize],
+                [self.currentAction[0], self.currentAction[1]],
                 dtype=torch.float32,
                 device=self.device
             ).reshape(1, 2)
@@ -295,7 +187,7 @@ class RNN(nn.Module):
             dtype=torch.float32,
             device=self.device
         ).reshape(1, 1)  # (T=1, 1)
-        eval=False
+
         if eval:
             with torch.no_grad():
                 tx_action, obs_action, new_hidden = self.forward(state_tensor, center_tensor, prev_action_tensor, i_pulse_tensor, self.hidden)
@@ -367,16 +259,9 @@ class RNN(nn.Module):
             .tolist()
         )
 
-        start, stop = CognitiveAgent.continuous_action_to_interval(
-            center_val,
-            bandwidth_val,
-            self.fftSize, 
-            self.observationSize
-        )
-
-        self.currentAction = (start, stop)
+        self.currentAction = (center_val, bandwidth_val)
         
-        return (start, stop), new_observation_centers
+        return (center_val, bandwidth_val), new_observation_centers
 
     def record_reward(self, reward):
         self.rewards.append(reward)
@@ -569,11 +454,13 @@ class MFOSAgent(CognitiveAgent):
         observationSize=300,
         cpiLen=256, 
         iterationsPerPulse=20,
-        observationCenterCount=3
+        observationCenterCount=3, 
+        startIndex=0
     ):
-        super().__init__(fftSize=fftSize, cpiLen=cpiLen, iterationsPerPulse=iterationsPerPulse, observationCenterCount=observationCenterCount)
+        super().__init__(fftSize=fftSize, cpiLen=cpiLen, iterationsPerPulse=iterationsPerPulse, observationCenterCount=observationCenterCount, startIndex=startIndex)
 
         self.device = device
+        self.observationSize = observationSize
         self.population_size = population_size
         self.mutation_scale = mutation_scale
         self.elite_fraction = elite_fraction
@@ -587,8 +474,18 @@ class MFOSAgent(CognitiveAgent):
                 individual = MFOSIndividual(
                     random_genome(self.np_rng)
                 )
-                self.policy = RNN(individual.genome, fftSize=fftSize, observationSize=observationSize, action_dim=2, observ_dim=observationCenterCount, device=device, seed=seed)
                 self.population.append(individual)
+
+            # Build only the initial policy
+            self.policy = RNN(
+                self.population[0].genome,
+                fftSize=fftSize,
+                observationSize=observationSize,
+                action_dim=2,
+                observ_dim=observationCenterCount,
+                device=device,
+                seed=seed
+            )
         else:
             base_individual = MFOSIndividual(base_genome)
             self.policy = RNN(base_genome, fftSize=fftSize, observationSize=observationSize, action_dim=2, observ_dim=observationCenterCount, device=device, seed=seed)
@@ -614,17 +511,19 @@ class MFOSAgent(CognitiveAgent):
     def current_individual(self):
         return self.population[self.current_index]
     
-    def selectAction(self, state_seq, eval_mode):
-        state_seq_np = np.stack(state_seq)
+    def selectAction(self, eval_mode):
+        state_seq_np = np.stack(self.lastPulseStates)
 
         observation_centers = self.getObservationCenters(len(state_seq_np))
 
-        self.currentAction, self.currentScanOffsets = self.policy.select_action(
+        (center_val, bw_val), self.currentScanOffsets = self.policy.select_action(
             state_seq_np,
             observation_centers,
             self.cpiIndex / self.cpiLen,
             self.eval_mode
         )
+
+        self.currentAction = self.continuous_action_to_interval(center=center_val, bandwidth=bw_val, bandwidthMax=self.observationSize)
 
     def record_reward(self, reward):
         self.current_individual().record_reward(reward)
@@ -905,10 +804,12 @@ class AblatedMFOSAgent(CognitiveAgent):
         observationCenterCount=3,
         device='cpu',
         genome=None,
-        seed=0
+        seed=0,
+        startIndex=0
     ):
-        super().__init__(currentAction=currentAction, fftSize=fftSize, cpiLen=cpiLen, iterationsPerPulse=iterationsPerPulse, observationCenterCount=observationCenterCount)
+        super().__init__(currentAction=currentAction, fftSize=fftSize, cpiLen=cpiLen, iterationsPerPulse=iterationsPerPulse, observationCenterCount=observationCenterCount, startIndex=startIndex)
         self.eval_mode = False
+        self.observationSize = observationSize
         self.np_rng = np.random.default_rng(seed)
         if genome is None:
             self.policy = RNN(random_genome(self.np_rng), fftSize=fftSize, observationSize=observationSize, action_dim=2, observ_dim=observationCenterCount, device=device, seed=seed)
@@ -918,17 +819,20 @@ class AblatedMFOSAgent(CognitiveAgent):
     def set_eval_mode(self):
         self.eval_mode = True
     
-    def selectAction(self, state_seq, eval_mode):
-        state_seq_np = np.stack(state_seq)
+    def selectAction(self, eval_mode):
+        state_seq_np = np.stack(self.lastPulseStates)
 
         observation_centers = self.getObservationCenters(len(state_seq_np))
 
-        self.currentAction, self.currentScanOffsets = self.policy.select_action(
+        (center_val, bw_val), self.currentScanOffsets = self.policy.select_action(
             state_seq_np,
             observation_centers,
             self.cpiIndex / self.cpiLen,
             self.eval_mode
         )
+
+        self.currentAction = self.continuous_action_to_interval(center=center_val, bandwidth=bw_val, bandwidthMax=self.observationSize)
+
     
     def record_reward(self, reward):
         self.policy.record_reward(reward)

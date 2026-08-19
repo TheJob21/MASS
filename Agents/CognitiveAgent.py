@@ -4,7 +4,7 @@ from collections import deque
 import numpy as np
 
 class CognitiveAgent(Agent, ABC):
-    def __init__(self, currentAction=None, fftSize=1024, cpiLen=256, iterationsPerPulse=20, observationCenterCount=3):
+    def __init__(self, currentAction=None, fftSize=1024, cpiLen=256, iterationsPerPulse=20, observationCenterCount=3, startIndex=0):
         super().__init__(currentAction=currentAction, fftSize=fftSize)
         self.cpiLen = cpiLen
         self.allActions = [] # array of tuples (centerFreq (MHz), BW (MHz))
@@ -17,11 +17,12 @@ class CognitiveAgent(Agent, ABC):
         self.sumBwForCPI = 0
         self.isTransmitting = False
         self.cpiIndex = 0
+        self.startIndex = startIndex
         self.observationCenterCount = observationCenterCount
         self.currentObservationCenters = [0] * observationCenterCount # Stored as normalized values between (-1, 1)
 
     @abstractmethod
-    def selectAction(self, state_seq, eval_mode):
+    def selectAction(self, eval_mode):
         pass
 
     def storeReward(self, reward):
@@ -40,19 +41,15 @@ class CognitiveAgent(Agent, ABC):
         if self.cpiIndex == 0:
             self.sumCenterFreqForCPI = 0
             self.sumBwForCPI = 0
-        else:
-            self.sumCenterFreqForCPI += newAction[0]
-            self.sumBwForCPI += newAction[1]
+
+        self.sumCenterFreqForCPI += newAction[0]
+        self.sumBwForCPI += newAction[1]
     
     def getAveCenterFreqForCPI(self):
-        if self.cpiIndex == 0:
-            return 0
-        return self.sumCenterFreqForCPI / self.cpiIndex
+        return self.sumCenterFreqForCPI / (self.cpiIndex + 1)
     
     def getAveBwForCPI(self):
-        if self.cpiIndex == 0:
-            return 0
-        return self.sumBwForCPI / self.cpiIndex
+        return self.sumBwForCPI / (self.cpiIndex + 1)
     
     def curActionAsCenterFreqBW(self, binSize, startingFrequency):
         
@@ -80,8 +77,7 @@ class CognitiveAgent(Agent, ABC):
         return self.__class__.__name__.lower()
     
     # Utility: Continuous → Interval
-    @staticmethod   
-    def continuous_action_to_interval(center, bandwidth, fftSize=1024, bandwidthMax=1024):
+    def continuous_action_to_interval(self, center, bandwidth, bandwidthMax=1024):
         """
         center ∈ [-1, 1]
         bandwidth ∈ [0, 1]  (but we do not enforce it)
@@ -94,12 +90,11 @@ class CognitiveAgent(Agent, ABC):
         bw_bins = int(round(bandwidth * bandwidthMax))
         bw_bins = max(bw_bins, 102) # min 10 MHz
 
-        # --- Convert center to bin index (no clipping) ---
-        center_bin = int(round((center + 1.0) * 0.5 * (fftSize - 1)))
-
         # --- Compute interval ---
         half_bw = bw_bins // 2
 
+        # --- Convert center to bin index (no clipping) ---
+        center_bin = self.normalizedToBin(normalizedVal=center, bwBins=bw_bins)
         start = center_bin - half_bw
         stop = start + bw_bins
 
@@ -118,5 +113,8 @@ class CognitiveAgent(Agent, ABC):
 
         return np.asarray(observation_centers, dtype=np.float32)
     
-    def normalizedToBin(self, normalizedVal):
-        return int(round((normalizedVal + 1.0) * 0.5 * (self.fftSize - 1)))
+    def normalizedToBin(self, normalizedVal, bwBins=0):
+        return int(round(
+            (normalizedVal + 1.0) * 0.5 * 
+            (self.fftSize - 1 - bwBins))
+        ) + (bwBins // 2)

@@ -15,11 +15,11 @@ from Agents.DPG.DPGAgent import DPGAgent
 from Agents.Control.RandomStartAgent import FixedStartAgent
 from Agents.MFOS.MFOSAgent import AblatedMFOSAgent
 from Agents.MFOS.MFOSAgent import MFOSAgent
-from collections import deque
 from rewards import Rewards
 from signal_processing import SignalProcessor
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
+from matplotlib.ticker import FuncFormatter
 from Agents.Checkpoints.checkpoint_utils import load_agents, save_agents
 
 torch.backends.cudnn.deterministic = True
@@ -70,7 +70,7 @@ class Environment:
         fftSize = len(state)
         
         center_norm = agent.currentObservationCenters[offset_idx]
-        center_bin = agent.normalizedToBin(center_norm)
+        center_bin = agent.normalizedToBin(normalizedVal=center_norm, bwBins=self.cfg.OBSERVATION_BIN_SIZE)
 
         half = observation_size // 2
 
@@ -114,8 +114,7 @@ class Environment:
         staticState,
         listOfAgents,
         iteration,
-        iterationsInPulse,
-        agentStartIndices
+        iterationsInPulse
     ):
         fftSize = self.cfg.FFT_SIZE
 
@@ -140,22 +139,17 @@ class Environment:
             ):
 
                 snapshot_idx = (
-                    iteration - agentStartIndices[idx]
+                    iteration - agent.startIndex
                 ) % iterationsInPulse
 
                 offset_idx = min(
-                    snapshot_idx * agent.        observationCenterCount
+                    snapshot_idx * agent.observationCenterCount
                     // iterationsInPulse,
-                    agent.        observationCenterCount - 1
+                    agent.observationCenterCount - 1
                 )
 
-                tx_center = (
-                    agent.currentAction[0]
-                    + agent.currentAction[1]
-                ) // 2
-
                 obs_center = agent.currentScanOffsets[offset_idx]
-                obs_center_bin = agent.normalizedToBin(obs_center)
+                obs_center_bin = agent.normalizedToBin(normalizedVal=obs_center, bwBins=self.cfg.OBSERVATION_BIN_SIZE)
                 half = self.cfg.OBSERVATION_BIN_SIZE // 2
 
                 left = obs_center_bin - half
@@ -584,7 +578,6 @@ class Environment:
         iterationsInPulse = int(self.cfg.PRI / timestep)
 
         allCogAgents = []
-        allCogAgentsStartIndices = []
 
         # Static Agents For Simulating Environment
         staticAgents = []
@@ -606,20 +599,18 @@ class Environment:
         numRandomStartAgents = self.cfg.AGENTS['random_start']
         randomStartAgents = []
         for randAgent in range(numRandomStartAgents):
-            randomStartAgents.append(FixedStartAgent(rng=randomStartAgentRNG))
-            randomStartAgents[randAgent].storeAction(randomStartAgents[randAgent].curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency))
             startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
-            allCogAgentsStartIndices.append(startIndex)
+            randomStartAgents.append(FixedStartAgent(rng=randomStartAgentRNG, startIndex=startIndex))
+            randomStartAgents[randAgent].storeAction(randomStartAgents[randAgent].curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency))
+
             allCogAgents.append(randomStartAgents[randAgent])
             
         # SAA Agent Parameters
         numSaaAgents = self.cfg.AGENTS['saa'] # Sense-And-Avoid
         saaAgents = []
         for saaAgent in range(numSaaAgents):
-            saaAgents.append(SAAAgent())
-
             startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
-            allCogAgentsStartIndices.append(startIndex)
+            saaAgents.append(SAAAgent(startIndex=startIndex))
             allCogAgents.append(saaAgents[saaAgent])
             
         # PPO Agent Parameters
@@ -635,7 +626,8 @@ class Environment:
                 "batch_size": 64,
                 "bptt_chunk": 16
             }
-            
+
+            startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
             ppoAgents.append(PPOAgent(fftSize=self.cfg.FFT_SIZE,
                                       observationSize=self.cfg.OBSERVATION_BIN_SIZE,
                                       cpiLen=self.cfg.CPI_LEN, 
@@ -649,9 +641,8 @@ class Environment:
                                       batch_size=bestConfig.get("batch_size"),
                                       bptt_chunk=bestConfig.get("bptt_chunk"),
                                       entropy_coef=bestConfig.get("entropy_coef"),
-                                      seed=ppoSeed+ppoAgent))
-            startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
-            allCogAgentsStartIndices.append(startIndex)
+                                      seed=ppoSeed+ppoAgent,
+                                      startIndex=startIndex))
             allCogAgents.append(ppoAgents[ppoAgent])
 
         # DQN Agent Parameters
@@ -687,6 +678,7 @@ class Environment:
                 "batch_size": 32            
             }
             
+            startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
             dqnAgents.append(DQNAgent(actionList=DQN_ACTIONS,
                             fftSize=self.cfg.FFT_SIZE,
                             observationSize=self.cfg.OBSERVATION_BIN_SIZE,
@@ -698,9 +690,8 @@ class Environment:
                             epsilon=bestConfig.get("epsilon"),
                             gamma=bestConfig.get("gamma"),
                             lr=bestConfig.get("lr"), 
-                            batch_size=bestConfig.get("batch_size")))
-            startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
-            allCogAgentsStartIndices.append(startIndex)
+                            batch_size=bestConfig.get("batch_size"),
+                            startIndex=startIndex))
             allCogAgents.append(dqnAgents[dqnAgent])
 
         # M-FOS Agent Initialization
@@ -708,41 +699,40 @@ class Environment:
         mfosAgents = []
         for mfosAgentI in range(numMfosAgents):
             base_genome = {
-                "lr": 4.99e-4,
-                "gamma": 0.9509,
-                "exploration_center": 0.711,
-                "exploration_bw": 0.06077,
-                "exploration_obs": 0.2,
-                "entropy_coef_tx": .00401,
-                "entropy_coef_obs": .00401
+                "lr": 2.82e-4,
+                "gamma": 0.9095,
+                "exploration_center": 0.6276,
+                "exploration_bw": 0.12531,
+                "exploration_obs": 0.26481,
+                "entropy_coef_tx": .00409,
+                "entropy_coef_obs": .00765
             }
             # base_genome = None # Random Genomes
+            startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
             mfosAgent = MFOSAgent(
                 population_size=5,
-                base_genome=None,
+                base_genome=base_genome,
                 mutation_scale=0.05,
                 elite_fraction=.4,
                 fresh_fraction=0.2,
-                seed=self.cfg.SEED + mfosAgentI, #42075 is good for random genomes and weights?
+                seed=mfosSeed + mfosAgentI, #42075 is good for random genomes and weights?
                 device=self.cfg.DEVICE,
                 fftSize=self.cfg.FFT_SIZE,
                 observationSize=self.cfg.OBSERVATION_BIN_SIZE,
                 cpiLen=self.cfg.CPI_LEN, 
                 iterationsPerPulse=iterationsInPulse,
-                observationCenterCount=self.cfg.OBSERVATION_CENTER_COUNT
+                observationCenterCount=self.cfg.OBSERVATION_CENTER_COUNT,
+                startIndex=startIndex
             )
             mfosAgents.append(mfosAgent)
-            startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
-            allCogAgentsStartIndices.append(startIndex)
             allCogAgents.append(mfosAgent)
 
         # DPG Agent Initialization
         numDpgAgents = self.cfg.AGENTS['dpg']
         dpgAgents = []
         for i in range(numDpgAgents):
-            dpgAgents.append(DPGAgent(fftSize=self.cfg.FFT_SIZE, observationSize=self.cfg.OBSERVATION_BIN_SIZE, device=self.cfg.DEVICE))
             startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
-            allCogAgentsStartIndices.append(startIndex)
+            dpgAgents.append(DPGAgent(fftSize=self.cfg.FFT_SIZE, observationSize=self.cfg.OBSERVATION_BIN_SIZE, device=self.cfg.DEVICE, startIndex=startIndex))
             allCogAgents.append(dpgAgents[i])
 
         # Ablated M-FOS Agent Initialization
@@ -750,14 +740,15 @@ class Environment:
         ablatedMFOSAgents = []
         for mfosAgentI in range(numAblatedMfosAgents):
             genome = {
-                "lr": 4.99e-4,
-                "gamma": 0.9509,
-                "exploration_center": 0.711,
-                "exploration_bw": 0.06077,
-                "exploration_obs": 0.2,
-                "entropy_coef_tx": .00401,
-                "entropy_coef_obs": .00401
+                "lr": 2.82e-4,
+                "gamma": 0.9095,
+                "exploration_center": 0.6276,
+                "exploration_bw": 0.12531,
+                "exploration_obs": 0.26481,
+                "entropy_coef_tx": .00409,
+                "entropy_coef_obs": .00765
             }
+            startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
             ablatedMfosAgent = AblatedMFOSAgent(
                 fftSize=self.cfg.FFT_SIZE,
                 observationSize=self.cfg.OBSERVATION_BIN_SIZE,
@@ -765,12 +756,11 @@ class Environment:
                 iterationsPerPulse=iterationsInPulse,
                 observationCenterCount=self.cfg.OBSERVATION_CENTER_COUNT,
                 device=self.cfg.DEVICE,
-                genome=None,
-                seed=self.cfg.SEED + mfosAgentI + 1 #42075 is good for random genomes and weights?
+                genome=genome,
+                seed=mfosSeed + mfosAgentI + numMfosAgents, #42075 is good for random genomes and weights?
+                startIndex=startIndex
             )
             ablatedMFOSAgents.append(ablatedMfosAgent)
-            startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
-            allCogAgentsStartIndices.append(startIndex)
             allCogAgents.append(ablatedMfosAgent)
 
         if self.cfg.LOAD_CHECKPOINTS:
@@ -778,6 +768,10 @@ class Environment:
 
         binOwnership = np.zeros(self.cfg.FFT_SIZE, dtype=np.int8) # 0=unowned, 1=staticOwner, 2+=cogUser
 
+        spectrumSampleStartWindow = self.cfg.SPECTRUM_SAMPLE_SIZE
+        spectrumSampleMiddleStart = (iterations // 2) - (self.cfg.SPECTRUM_SAMPLE_SIZE // 2)
+        spectrumSampleMiddleEnd = (iterations // 2) + (self.cfg.SPECTRUM_SAMPLE_SIZE // 2)
+        spectrumSampleEndStart = iterations - self.cfg.SPECTRUM_SAMPLE_SIZE
 
         # main loop
         for i in range(iterations): # 1 = 12.8 microseconds
@@ -797,33 +791,32 @@ class Environment:
                 print(int(i/1000), "K iterations completed.")
             
             # store previous state space without the active agents action
-            for idx, agent in enumerate(allCogAgents):
+            for agent in allCogAgents:
                 prevStateWithoutAgent = staticState.copy()
                 if self.cfg.MULTI_AGENT:
-                    for idx2, agent2 in enumerate(allCogAgents):
-                        if idx != idx2 and agent2.isTransmitting:
+                    for agent2 in allCogAgents:
+                        if agent != agent2 and agent2.isTransmitting:
                             prevStateWithoutAgent = self.updateStateInterval(prevStateWithoutAgent, agent2.currentAction)
                 if self.cfg.LIMIT_OBSERVATION:
                     snapshot_idx = (
-                        i - allCogAgentsStartIndices[idx]
+                        i - agent.startIndex
                     ) % iterationsInPulse
                     offset_idx = min(
-                        snapshot_idx * allCogAgents[idx].observationCenterCount // iterationsInPulse,
-                        allCogAgents[idx].observationCenterCount-1
+                        snapshot_idx * agent.observationCenterCount // iterationsInPulse,
+                        agent.observationCenterCount-1
                     )
-                    observation = self.get_observation_window(prevStateWithoutAgent, allCogAgents[idx], offset_idx, self.cfg.OBSERVATION_BIN_SIZE)
+                    observation = self.get_observation_window(prevStateWithoutAgent, agent, offset_idx, self.cfg.OBSERVATION_BIN_SIZE)
                     agent.lastPulseStates.append(observation)
                 else:
                     agent.lastPulseStates.append(prevStateWithoutAgent)
 
             # Generate actions for agents
             for agentI, agent in enumerate(allCogAgents):
-                if i % iterationsInPulse == allCogAgentsStartIndices[agentI]: # every 204.8 usec
-                    agentStates = agent.lastPulseStates
-                    if len(agentStates) == iterationsInPulse:
-                        agent.selectAction(state_seq=agentStates, eval_mode=self.cfg.EVAL_MODE)
+                if i % iterationsInPulse == agent.startIndex: # every 204.8 usec
+                    if len(agent.lastPulseStates) == iterationsInPulse:
+                        agent.selectAction(eval_mode=self.cfg.EVAL_MODE)
                         agent.storeAction(agent.curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency))
-                elif i % iterationsInPulse == ((allCogAgentsStartIndices[agentI]+1) % iterationsInPulse): # Pulse lasts one iteration, then listens for PRI duration
+                elif i % iterationsInPulse == ((agent.startIndex+1) % iterationsInPulse): # Pulse lasts one iteration, then listens for PRI duration
                     allCogAgents[agentI].isTransmitting = False         
 
 
@@ -850,8 +843,12 @@ class Environment:
                 staticState=staticState, 
                 cognitiveAgents=allCogAgents
             )
-            # Only build labeled state for final sample size
-            if i >= iterations-spectrumSampleSize: 
+            # Only build labeled state during sampling period
+            if (
+                i < spectrumSampleStartWindow 
+                or (spectrumSampleMiddleStart <= i < spectrumSampleMiddleEnd)
+                or i >= spectrumSampleEndStart
+            ): 
                 allStates.append(self.build_labeled_state(
                     staticState=staticState,
                     listOfAgents=allCogAgents,
@@ -861,8 +858,7 @@ class Environment:
                     staticState=staticState,
                     listOfAgents=allCogAgents,
                     iteration=i,
-                    iterationsInPulse=iterationsInPulse,
-                    agentStartIndices=allCogAgentsStartIndices
+                    iterationsInPulse=iterationsInPulse
                 ))
             deadSpaceInterval = self.getLargestDeadSpaceInterval(currentState)
             if deadSpaceInterval == None:
@@ -936,7 +932,7 @@ class Environment:
                         dqnAgent.target.load_state_dict(dqnAgent.policy.state_dict())
                 
                 if i % (self.cfg.CPI_LEN * iterationsInPulse * 8) == 0 and i > 0:
-                    for mfosAgent in mfosAgents:
+                    for idx, mfosAgent in enumerate(mfosAgents):
 
                         mfosAgent.finish_individual()
 
@@ -983,18 +979,13 @@ class Environment:
         stateMatrix = np.stack(states_list)
         alphaMatrix = np.stack(alphas_list)
 
-        colors = []
         colorCount = numRandomStartAgents + numSaaAgents + numPpoAgents + numDqnAgents + numMfosAgents + numDpgAgents + numAblatedMfosAgents + 3
 
         cmap = self.build_agent_colormap(colorCount)
-        bounds = []
-        for i in range(colorCount+1):
-            bounds.append(i)
 
+        bounds = [i - 0.5 for i in range(colorCount + 1)]
         norm = BoundaryNorm(bounds, cmap.N)
-        ticks = []
-        for i in range(colorCount):
-            ticks.append(i+0.5)
+
         plt.ion()
         plt.figure(figsize=(14,14))
         im = plt.imshow(
@@ -1003,7 +994,8 @@ class Environment:
             origin="lower",
             cmap=cmap,
             norm=norm,
-            alpha=alphaMatrix
+            alpha=alphaMatrix,
+            interpolation="nearest"
         )
         im.format_cursor_data = lambda _: ""
         if self.cfg.SIM_MODE:
@@ -1011,8 +1003,31 @@ class Environment:
         else:
             plt.xlabel("Frequency Bin (" + ("2.4-2.5" if liveDataFilename == './Data/spectrum_245ghz.dat' or liveDataFilename == './Data/union_spectrum_245ghz.dat' else "2.59-2.69") + "GHz)")
         plt.ylabel(f"Time Step (1 time step = {timestep} usec)")
+        sample = self.cfg.SPECTRUM_SAMPLE_SIZE
+
+        def y_formatter(y, pos):
+            if y < 0:
+                return ""
+
+            if y < sample:
+                return f"{int(y):,}"
+            elif y < 2 * sample:
+                return f"{int(spectrumSampleMiddleStart + (y - sample)):,}"
+            elif y < 3 * sample:
+                return f"{int(spectrumSampleEndStart + (y - 2 * sample)):,}"
+            else:
+                return ""
+        ax = plt.gca()
+        ax.yaxis.set_major_formatter(FuncFormatter(y_formatter))
+
+        # Divider lines
+        ax.axhline(sample - 0.5, color="black", linewidth=2)
+        ax.axhline(2 * sample - 0.5, color="black", linewidth=2)
+
+        
         plt.title(f"Spectrum Occupancy Over Time (Last {spectrumSampleSize} time steps)")
-        cbar = plt.colorbar(ticks=ticks)
+        cbar = plt.colorbar(im)
+        cbar.set_ticks(range(colorCount))
         tickLabels = []
         tickLabels.append("Free")
         # One color for all static agents
@@ -1056,10 +1071,8 @@ class Environment:
 
         cmap = self.build_agent_colormap(colorCount)
 
-        bounds = list(range(colorCount + 1))
+        bounds = [i - 0.5 for i in range(colorCount + 1)]
         norm = BoundaryNorm(bounds, cmap.N)
-
-        ticks = [i + 0.5 for i in range(colorCount)]
 
         plt.figure(figsize=(14, 14))
 
@@ -1069,7 +1082,8 @@ class Environment:
             origin="lower",
             cmap=cmap,
             norm=norm,
-            alpha=observationAlphaMatrix
+            alpha=observationAlphaMatrix,
+            interpolation="nearest"
         )
 
         im.format_cursor_data = lambda _: ""
@@ -1092,8 +1106,15 @@ class Environment:
             f"Agent Observation Windows and Transmissions "
             f"(Last {spectrumSampleSize} time steps)"
         )
+        ax = plt.gca()
+        ax.yaxis.set_major_formatter(FuncFormatter(y_formatter))
 
-        cbar = plt.colorbar(ticks=ticks)
+        # Divider lines
+        ax.axhline(sample - 0.5, color="black", linewidth=2)
+        ax.axhline(2 * sample - 0.5, color="black", linewidth=2)
+
+        cbar = plt.colorbar(im)
+        cbar.set_ticks(range(colorCount))
 
         tickLabels = ["Empty", "Static Agents"]
         for randomStartAgent in range(numRandomStartAgents):
@@ -1334,6 +1355,11 @@ class Environment:
         df = pd.DataFrame(rows)
         df = df.round(4)
 
+        # Ensure output directory exists
+        output_dir = os.path.dirname(self.cfg.OUTPUT_FILE)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+
         base, ext = os.path.splitext(self.cfg.OUTPUT_FILE)
         i = 1
 
@@ -1450,8 +1476,7 @@ class Environment:
                                       seed=ppoSeed+ppoAgentI)
             ppoTrials.append({
                 "agent": agent,
-                "config": config,
-                "history": deque(maxlen=iterationsInPulse)
+                "config": config
             })
 
         # DQN Agent Parameters
@@ -1489,8 +1514,7 @@ class Environment:
                             batch_size=config.get("batch_size"))
             dqnTrials.append({
                 "agent": agent,
-                "config": config,
-                "history": deque(maxlen=iterationsInPulse)
+                "config": config
             })
 
         # Ablated M-FOS Agent Initialization
@@ -1501,8 +1525,9 @@ class Environment:
             config = {
                 "lr": 10 ** mfosRNG.uniform(-5, -3),
                 "gamma": mfosRNG.uniform(0.9, 0.999),                        # uniform
-                "exploration_center": mfosRNG.uniform(0.01, 0.3),
-                "exploration_bw": mfosRNG.uniform(0.01, 0.2),
+                "exploration_center": mfosRNG.uniform(0.01, 0.9),
+                "exploration_bw": mfosRNG.uniform(0.02, 0.15),
+                "exploration_obs": mfosRNG.uniform(0.05, 0.3),
                 "entropy_coef_tx": 10 ** mfosRNG.uniform(-4, -2),
                 "entropy_coef_obs": 10 ** mfosRNG.uniform(-4, -2)
             }
@@ -1517,8 +1542,7 @@ class Environment:
             )
             ablatedMFOSTrials.append({
                 "agent": agent,
-                "config": config,
-                "history": deque(maxlen=iterationsInPulse)
+                "config": config
             })
     
         binOwnership = np.zeros(self.cfg.FFT_SIZE, dtype=np.int16) # 0=unowned, 1=staticOwner, 2+=cogUser
@@ -1585,38 +1609,44 @@ class Environment:
                 print(int(i/1000), "K iterations completed.")
             
             # store previous state space without the active agents action
-            for trial in ppoTrials:
-                trial["history"].append(staticState.copy())
-            for trial in dqnTrials:
-                trial["history"].append(staticState.copy())
-            for trial in ablatedMFOSTrials:
-                trial["history"].append(staticState.copy())
+            for trials in [ppoTrials, dqnTrials, ablatedMFOSTrials]:
+                for trial in trials:
+                    prevStateWithoutAgent = staticState.copy()
+                    if self.cfg.LIMIT_OBSERVATION:
+                        snapshot_idx = (
+                            i - trial["agent"].startIndex
+                        ) % iterationsInPulse
+                        offset_idx = min(
+                            snapshot_idx * trial["agent"].observationCenterCount // iterationsInPulse,
+                            trial["agent"].observationCenterCount-1
+                        )
+                        observation = self.get_observation_window(prevStateWithoutAgent, trial["agent"], offset_idx, self.cfg.OBSERVATION_BIN_SIZE)
+                        trial["agent"].lastPulseStates.append(observation)
+                    else:
+                        trial["agent"].lastPulseStates.append(prevStateWithoutAgent)
 
             # Generate actions for agents
             for trial in ppoTrials:
                 agent = trial["agent"]
                 if i % iterationsInPulse == 0: # every 204.8 usec
-                    agentStates = trial["history"]
-                    if len(agentStates) == iterationsInPulse:
-                        agent.selectAction(state_seq=agentStates, eval_mode=self.cfg.EVAL_MODE)
+                    if len(agent.lastPulseStates) == iterationsInPulse:
+                        agent.selectAction(eval_mode=self.cfg.EVAL_MODE)
                         agent.storeAction(agent.curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency))
                 elif i % iterationsInPulse == 1: # Pulse lasts one iteration, then listens for PRI duration
                     agent.isTransmitting = False
             for trial in dqnTrials:
                 agent = trial["agent"]
                 if i % iterationsInPulse == 0: # every 204.8 usec
-                    agentStates = trial["history"]
-                    if len(agentStates) == iterationsInPulse:
-                        agent.selectAction(state_seq=agentStates, eval_mode=self.cfg.EVAL_MODE)
+                    if len(agent.lastPulseStates) == iterationsInPulse:
+                        agent.selectAction(eval_mode=self.cfg.EVAL_MODE)
                         agent.storeAction(agent.curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency))
                 elif i % iterationsInPulse == 1: # Pulse lasts one iteration, then listens for PRI duration
                     agent.isTransmitting = False
             for trial in ablatedMFOSTrials:
                 agent = trial["agent"]
                 if i % iterationsInPulse == 0: # every 204.8 usec
-                    agentStates = trial["history"]
-                    if len(agentStates) == iterationsInPulse:
-                        agent.selectAction(state_seq=agentStates, eval_mode=self.cfg.EVAL_MODE)
+                    if len(agent.lastPulseStates) == iterationsInPulse:
+                        agent.selectAction(eval_mode=self.cfg.EVAL_MODE)
                         agent.storeAction(agent.curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency))
                 elif i % iterationsInPulse == 1: # Pulse lasts one iteration, then listens for PRI duration
                     agent.isTransmitting = False   
@@ -1662,7 +1692,7 @@ class Environment:
                 startingFrequency=startingFrequency
             )
             
-            if i > 0 and len(ablatedMFOSTrials[0]["history"]) == iterationsInPulse: # every 204.8 usec
+            if i > 0 and len(ablatedMFOSTrials[0]["agent"].lastPulseStates) == iterationsInPulse: # every 204.8 usec
                 # Update PPO Agents
                 for ppoAgent in [trial["agent"] for trial in ppoTrials]:
                     if len(ppoAgent.allRewards) > 0 and len(ppoAgent.pulseRewards) == 0:
@@ -1767,7 +1797,7 @@ class Environment:
         print("Top 5 Ablated M-FOS Hyperparameter Trials")
         print("==============================")
 
-        print("\nRank | Reward | Learning Rate | Gamma | Exploration Center | Exploration BW | Entropy")
+        print("\nRank | Reward | Learning Rate | Gamma | Exploration Center | Exploration BW | Exploration Obs | entropy Tx | Entropy Obs")
         print("-" * 80)
 
         for rank, (reward, trial) in enumerate(scores, start=1):
@@ -1779,5 +1809,7 @@ class Environment:
                 f"{cfg['gamma']:.4f} | "
                 f"{cfg['exploration_center']:.4f} | "
                 f"{cfg['exploration_bw']:.5f} | "
-                f"{cfg['entropy_coef']:.5f}"
+                f"{cfg['exploration_obs']:.5f} | "
+                f"{cfg['entropy_coef_tx']:.5f} | "
+                f"{cfg['entropy_coef_obs']:.5f}"
             )

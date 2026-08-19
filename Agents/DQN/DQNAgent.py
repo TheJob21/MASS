@@ -6,9 +6,23 @@ import numpy as np
 from Agents.CognitiveAgent import CognitiveAgent
 
 class DQNAgent(CognitiveAgent):
-    def __init__(self, actionList, currentAction=None, fftSize=1024, observationSize=300, seed=0, cpiLen=256, iterationsPerPulse=20, scanOffsetCount=3, device="cpu",
-                 epsilon=1.0, gamma=0.9, lr=1e-4, batch_size=32):
-        super().__init__(currentAction=currentAction, fftSize=fftSize, cpiLen=cpiLen, iterationsPerPulse=iterationsPerPulse, observationCenterCount=scanOffsetCount)
+    def __init__(
+            self, 
+            actionList, 
+            currentAction=None, 
+            fftSize=1024, 
+            observationSize=300, 
+            seed=0, 
+            cpiLen=256, 
+            iterationsPerPulse=20, 
+            scanOffsetCount=3, 
+            device="cpu",
+            epsilon=1.0, 
+            gamma=0.9, 
+            lr=1e-4, 
+            batch_size=32,
+            startIndex=0):
+        super().__init__(currentAction=currentAction, fftSize=fftSize, cpiLen=cpiLen, iterationsPerPulse=iterationsPerPulse, observationCenterCount=scanOffsetCount, startIndex=startIndex)
         
         self.DQN_ACTIONS = actionList
         self.lr = lr
@@ -56,9 +70,9 @@ class DQNAgent(CognitiveAgent):
     #         interval = self.DQN_ACTIONS[self.action_idx]
     #         self.currentAction = interval
 
-    def selectAction(self, state_seq, eval_mode):
+    def selectAction(self, eval_mode):
 
-        state_np = np.stack(state_seq).astype(np.float32)
+        state_np = np.stack(self.lastPulseStates).astype(np.float32)
         num_snapshots = len(state_np)
 
         observationCenters = self.getObservationCenters(num_snapshots)

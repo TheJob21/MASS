@@ -2,11 +2,11 @@ from Agents.CognitiveAgent import CognitiveAgent
 import numpy as np
 
 class SAAAgent(CognitiveAgent):
-    def __init__(self, currentAction=None, fftSize=1024, cpiLen=256):
-        super().__init__(currentAction, fftSize, cpiLen)
+    def __init__(self, currentAction=None, fftSize=1024, cpiLen=256, startIndex=0):
+        super().__init__(currentAction, fftSize, cpiLen, startIndex=startIndex)
         
-    def selectAction(self, state_seq, eval_mode):
-        prevState = state_seq[-1]
+    def selectAction(self, eval_mode):
+        prevState = self.lastPulseStates[-1]
         is_false = ~prevState
         padded = np.concatenate(([0], is_false.view(np.int8), [0]))
         diffs = np.diff(padded)

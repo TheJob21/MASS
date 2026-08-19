@@ -15,10 +15,10 @@ LOAD_CHECKPOINTS = False
 AUTO_SAVE_LATEST = False
 
 
-OUTPUT_FILE = "./Output/agent_eval_summary_PpoLimitedObservation.xlsx"
+OUTPUT_FILE = "./Output/agent_eval_summary_multiUnion245.xlsx"
 
-DATA_CHOICE = "245"
-# DATA_CHOICE = "u245"
+# DATA_CHOICE = "245"
+DATA_CHOICE = "u245"
 # DATA_CHOICE = "264"
 # DATA_CHOICE = "u264"
 
@@ -58,18 +58,18 @@ HOCAE_PFA = 1e-2
 # AGENT COUNTS
 AGENTS = {
     "static": {
-        "fat": 1,
-        "skinny": 1,
-        "pulsed": 1,
-        "rectangular": 1
+        "fat": 2,
+        "skinny": 3,
+        "pulsed": 5,
+        "rectangular": 0
     },
     "random_start": 0,
     "saa": 0,
     "ppo": 0,
     "dqn": 0,
-    "mfos": 0,
+    "mfos": 1,
     "dpg": 0,
-    "ablated_mfos": 0
+    "ablated_mfos": 1
 }
 
 # PPO
@@ -114,12 +114,12 @@ MFOS = {
 # collisionTransmissionTolRatio = 0.033
 
 REWARD = {
-    "collision_ratio": 0.4,#0.033,
+    "collision_ratio": 0.02,#0.033,
     "beta": 0.75,
     "transmission_weight": 1.0,
     "collision_weight": None,  # computed dynamically if needed
-    "bandwidth_distortion": 0.1,
-    "center_distortion": 0.1,
+    "bandwidth_distortion": 0.3,
+    "center_distortion": 0.3,
     "deadspace_penalty_scale": 1.0
 }
 
@@ -135,8 +135,8 @@ if not LIMIT_OBSERVATION:
 OBSERVATION_CENTER_COUNT = 3
 
 # RUNTIME CONTROL
-ITERATIONS = 110_000
-SPECTRUM_SAMPLE_SIZE = 30_000
+ITERATIONS = 5_000_000
+SPECTRUM_SAMPLE_SIZE = 15_000
 
 EVAL_SPLIT = 0.8
 PRINT_INTERVAL = 100_000
