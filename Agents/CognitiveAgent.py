@@ -4,15 +4,20 @@ from collections import deque
 import numpy as np
 
 class CognitiveAgent(Agent, ABC):
-    def __init__(self, currentAction=None, fftSize=1024, cpiLen=256, iterationsPerPulse=20, observationCenterCount=3, startIndex=0):
+    def __init__(self, currentAction=None, fftSize=1024, cpiLen=256, iterationsPerPulse=20, 
+                 observationCenterCount=3, startIndex=0, binSize=10.24, startingFrequency=2400,
+                 pulsesPerAction=1):
         super().__init__(currentAction=currentAction, fftSize=fftSize)
         self.cpiLen = cpiLen
         self.allActions = [] # array of tuples (centerFreq (MHz), BW (MHz))
         self.collisions = [] # array of total frequency overlap in MHz
         self.allRewards = [] # array of reward per pulse
         self.pulseRewards = [] # array of rewards in current pulse
+        self.actionRewards = [] # array of rewards in current action
         self.iterationsPerPulse = iterationsPerPulse
-        self.lastPulseStates = deque(maxlen=iterationsPerPulse)
+        self.pulsesPerAction = pulsesPerAction
+        self.iterationsPerAction = iterationsPerPulse*pulsesPerAction
+        self.lastPulseStates = deque(maxlen=self.iterationsPerPulse)
         self.sumCenterFreqForCPI = 0
         self.sumBwForCPI = 0
         self.isTransmitting = False
@@ -20,30 +25,41 @@ class CognitiveAgent(Agent, ABC):
         self.startIndex = startIndex
         self.observationCenterCount = observationCenterCount
         self.currentObservationCenters = [0] * observationCenterCount # Stored as normalized values between (-1, 1)
-
+        self.binSize = binSize # MHz
+        self.startingFrequency = startingFrequency # MHz
+        
     @abstractmethod
-    def selectAction(self, eval_mode):
+    def selectAction(self, eval_mode, obs_only):
         pass
 
     def storeReward(self, reward):
         self.pulseRewards.append(reward)
         if len(self.pulseRewards) == self.iterationsPerPulse:
-            self.allRewards.append(sum(self.pulseRewards))
+            self.actionRewards.append(sum(self.pulseRewards))
             self.pulseRewards = []
+            if len(self.actionRewards) == self.pulsesPerAction:
+                self.allRewards.append(sum(self.actionRewards) / self.pulsesPerAction)
+                self.actionRewards = []
+
     
     def storeAction(self, newAction):
         self.allActions.append(newAction)
-        self.cpiIndex += 1
-        if self.cpiIndex == self.cpiLen:
-            self.cpiIndex = 0
-        self.isTransmitting = False if newAction == None else True
-        
+
         if self.cpiIndex == 0:
+            self.anchorAction = self.curActionAsCenterFreqBW()
+
             self.sumCenterFreqForCPI = 0
             self.sumBwForCPI = 0
 
+        self.isTransmitting = False if newAction == None else True
+    
+
         self.sumCenterFreqForCPI += newAction[0]
         self.sumBwForCPI += newAction[1]
+
+        self.cpiIndex += 1
+        if self.cpiIndex == self.cpiLen:
+            self.cpiIndex = 0
     
     def getAveCenterFreqForCPI(self):
         return self.sumCenterFreqForCPI / (self.cpiIndex + 1)
@@ -51,12 +67,12 @@ class CognitiveAgent(Agent, ABC):
     def getAveBwForCPI(self):
         return self.sumBwForCPI / (self.cpiIndex + 1)
     
-    def curActionAsCenterFreqBW(self, binSize, startingFrequency):
+    def curActionAsCenterFreqBW(self):
         
         if self.currentAction == None:
             return (0,0)
-        intervalBW = binSize * (self.currentAction[1] - self.currentAction[0]) # MHz
-        centerFreq = startingFrequency + ((binSize * self.currentAction[0]) + (intervalBW / 2)) # MHz
+        intervalBW = self.binSize * (self.currentAction[1] - self.currentAction[0]) # MHz
+        centerFreq = self.startingFrequency + ((self.binSize * self.currentAction[0]) + (intervalBW / 2)) # MHz
         return (centerFreq, intervalBW)
     
     @abstractmethod
@@ -101,15 +117,23 @@ class CognitiveAgent(Agent, ABC):
         return start, stop
     
     def getObservationCenters(self, num_snapshots):
-        observation_centers = []
+        pulse_centers = []
 
-        for snapshot_idx in range(num_snapshots):
+        for snapshot_idx in range(self.iterationsPerPulse):
             idx = min(
-                snapshot_idx * self.observationCenterCount // num_snapshots,
+                snapshot_idx * self.observationCenterCount
+                // self.iterationsPerPulse,
                 self.observationCenterCount - 1
             )
 
-            observation_centers.append(self.currentObservationCenters[idx])
+            pulse_centers.append(self.currentObservationCenters[idx])
+
+        # Repeat the pulse sequence enough times to cover num_snapshots
+        observation_centers = (
+            pulse_centers * int(np.ceil(
+                num_snapshots / self.iterationsPerPulse
+            ))
+        )
 
         return np.asarray(observation_centers, dtype=np.float32)
     

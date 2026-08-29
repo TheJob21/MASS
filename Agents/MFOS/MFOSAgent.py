@@ -45,9 +45,6 @@ class RNN(nn.Module):
         self.rewards = []
         self.currentAction = None
 
-        self.prevActions = []
-        self.cpiIndices = []
-
     # Build RNN policy from genome
     def _build_inner_policy(self, observationSize=300):
         state = torch.random.get_rng_state()
@@ -155,7 +152,7 @@ class RNN(nn.Module):
         return tx_action_raw, obs_action, hidden
     
 
-    def select_action(self, state_seq_np, observation_centers, normalizedCpiIndex, eval=False):
+    def select_action(self, state_seq_np, observation_centers, startOfCpi, eval=False, obs_only=False):
         state_tensor = torch.as_tensor(
             state_seq_np,
             dtype=torch.float32,
@@ -183,7 +180,7 @@ class RNN(nn.Module):
 
          # store current CPI index
         i_pulse_tensor = torch.tensor(
-            normalizedCpiIndex,  # normalized
+            startOfCpi,  # normalized
             dtype=torch.float32,
             device=self.device
         ).reshape(1, 1)  # (T=1, 1)
@@ -199,57 +196,20 @@ class RNN(nn.Module):
         else:
             self.hidden = None
             
-        center_mu = tx_action[0, 0]
-        bandwidth_mu = tx_action[0, 1]
         obs_mu = obs_action[0]
-
-        if eval:
-            center_std = self.genome["exploration_center"]
-            bw_std = self.genome["exploration_bw"]
-        else:
-            center_std = max(self.genome["exploration_center"], 0.02)
-            bw_std = max(self.genome["exploration_bw"], 0.01)
         obs_std = self.genome["exploration_obs"]
 
-        tx_mu = torch.stack([
-            center_mu,
-            bandwidth_mu
-        ])
-
-        tx_sigma = torch.tensor(
-            [center_std, bw_std],
-            dtype=tx_mu.dtype,
-            device=self.device
-        )
-        
         obs_sigma = torch.full_like(obs_mu, obs_std)
 
         if eval:
-            sampled_tx = tx_mu
             sampled_obs = obs_mu
         else:
-            tx_dist = NormalWithRNG(tx_mu, tx_sigma)
             obs_dist = NormalWithRNG(obs_mu, obs_sigma)
-
-            sampled_tx = tx_dist.sample(rng=self.torch_rng)
             sampled_obs = obs_dist.sample(rng=self.torch_rng)
-
-            tx_log_prob = tx_dist.log_prob(sampled_tx).sum()
             obs_log_prob = obs_dist.log_prob(sampled_obs).sum()
-
-            tx_entropy = tx_dist.entropy().sum()
             obs_entropy = obs_dist.entropy().sum()
-
-            self.tx_log_probs.append(tx_log_prob)
             self.obs_log_probs.append(obs_log_prob)
-
-            self.tx_entropy_history.append(tx_entropy)
             self.obs_entropy_history.append(obs_entropy)
-            
-        
-        # Decode transmit action
-        center_val = torch.tanh(sampled_tx[0]).item()
-        bandwidth_val = torch.sigmoid(sampled_tx[1]).item()
 
         # Decode observation centers
         new_observation_centers = (
@@ -258,6 +218,43 @@ class RNN(nn.Module):
             .cpu()
             .tolist()
         )
+
+        if obs_only:
+            return None, new_observation_centers
+
+        center_mu = tx_action[0, 0]
+        bandwidth_mu = tx_action[0, 1]
+        tx_mu = torch.stack([
+            center_mu,
+            bandwidth_mu
+        ])
+
+        if eval:
+            center_std = self.genome["exploration_center"]
+            bw_std = self.genome["exploration_bw"]
+        else:
+            center_std = max(self.genome["exploration_center"], 0.02)
+            bw_std = max(self.genome["exploration_bw"], 0.01)
+
+        tx_sigma = torch.tensor(
+            [center_std, bw_std],
+            dtype=tx_mu.dtype,
+            device=self.device
+        )
+
+        if eval:
+            sampled_tx = tx_mu
+        else:
+            tx_dist = NormalWithRNG(tx_mu, tx_sigma)
+            sampled_tx = tx_dist.sample(rng=self.torch_rng)
+            tx_log_prob = tx_dist.log_prob(sampled_tx).sum()
+            tx_entropy = tx_dist.entropy().sum()
+            self.tx_log_probs.append(tx_log_prob)
+            self.tx_entropy_history.append(tx_entropy)
+            
+        # Decode transmit action
+        center_val = torch.tanh(sampled_tx[0]).item()
+        bandwidth_val = torch.sigmoid(sampled_tx[1]).item()
 
         self.currentAction = (center_val, bandwidth_val)
         
@@ -455,9 +452,15 @@ class MFOSAgent(CognitiveAgent):
         cpiLen=256, 
         iterationsPerPulse=20,
         observationCenterCount=3, 
-        startIndex=0
+        startIndex=0,
+        binSize=10.24, 
+        startingFrequency=2400,
+        pulsesPerAction=1
     ):
-        super().__init__(fftSize=fftSize, cpiLen=cpiLen, iterationsPerPulse=iterationsPerPulse, observationCenterCount=observationCenterCount, startIndex=startIndex)
+        super().__init__(fftSize=fftSize, cpiLen=cpiLen, iterationsPerPulse=iterationsPerPulse, 
+                        observationCenterCount=observationCenterCount, startIndex=startIndex, 
+                        binSize=binSize, startingFrequency=startingFrequency,
+                        pulsesPerAction=pulsesPerAction)
 
         self.device = device
         self.observationSize = observationSize
@@ -471,9 +474,7 @@ class MFOSAgent(CognitiveAgent):
         self.population = []
         if base_genome is None:
             for _ in range(population_size):
-                individual = MFOSIndividual(
-                    random_genome(self.np_rng)
-                )
+                individual = MFOSIndividual(random_genome(self.np_rng))
                 self.population.append(individual)
 
             # Build only the initial policy
@@ -488,7 +489,8 @@ class MFOSAgent(CognitiveAgent):
             )
         else:
             base_individual = MFOSIndividual(base_genome)
-            self.policy = RNN(base_genome, fftSize=fftSize, observationSize=observationSize, action_dim=2, observ_dim=observationCenterCount, device=device, seed=seed)
+            self.policy = RNN(base_genome, fftSize=fftSize, observationSize=observationSize, 
+                              action_dim=2, observ_dim=observationCenterCount, device=device, seed=seed)
             
             self.population.append(base_individual)
 
@@ -511,19 +513,24 @@ class MFOSAgent(CognitiveAgent):
     def current_individual(self):
         return self.population[self.current_index]
     
-    def selectAction(self, eval_mode):
+    def selectAction(self, eval_mode, obs_only=False):
         state_seq_np = np.stack(self.lastPulseStates)
 
         observation_centers = self.getObservationCenters(len(state_seq_np))
 
-        (center_val, bw_val), self.currentScanOffsets = self.policy.select_action(
+        txAction, self.currentScanOffsets = self.policy.select_action(
             state_seq_np,
             observation_centers,
-            self.cpiIndex / self.cpiLen,
-            self.eval_mode
+            #self.cpiIndex / self.cpiLen,
+            1.0 if self.cpiIndex == 0 else 0.0,
+            self.eval_mode,
+            obs_only=obs_only
         )
+        
+        if not txAction == None:
+            (center_val, bw_val) = txAction
 
-        self.currentAction = self.continuous_action_to_interval(center=center_val, bandwidth=bw_val, bandwidthMax=self.observationSize)
+            self.currentAction = self.continuous_action_to_interval(center=center_val, bandwidth=bw_val, bandwidthMax=self.observationSize)
 
     def record_reward(self, reward):
         self.current_individual().record_reward(reward)
@@ -544,7 +551,7 @@ class MFOSAgent(CognitiveAgent):
             self.best_individual_ever = copy.deepcopy(individual)
 
         # Compute fitness (learning-based)
-        if len(rewards) < 20:
+        if len(rewards) < 25:
             fitness = 0.0
         else:
             if len(rewards) > 50:
@@ -805,33 +812,46 @@ class AblatedMFOSAgent(CognitiveAgent):
         device='cpu',
         genome=None,
         seed=0,
-        startIndex=0
+        startIndex=0,
+        binSize=10.24, 
+        startingFrequency=2400,
+        pulsesPerAction=1
     ):
-        super().__init__(currentAction=currentAction, fftSize=fftSize, cpiLen=cpiLen, iterationsPerPulse=iterationsPerPulse, observationCenterCount=observationCenterCount, startIndex=startIndex)
+        super().__init__(currentAction=currentAction, fftSize=fftSize, cpiLen=cpiLen, 
+                         iterationsPerPulse=iterationsPerPulse, observationCenterCount=observationCenterCount, 
+                         startIndex=startIndex, binSize=binSize, startingFrequency=startingFrequency,
+                         pulsesPerAction=pulsesPerAction)
         self.eval_mode = False
         self.observationSize = observationSize
         self.np_rng = np.random.default_rng(seed)
         if genome is None:
-            self.policy = RNN(random_genome(self.np_rng), fftSize=fftSize, observationSize=observationSize, action_dim=2, observ_dim=observationCenterCount, device=device, seed=seed)
+            self.policy = RNN(random_genome(self.np_rng), fftSize=fftSize, observationSize=observationSize, 
+                              action_dim=2, observ_dim=observationCenterCount, device=device, seed=seed)
         else:
-            self.policy = RNN(genome, fftSize=fftSize, observationSize=observationSize, action_dim=2, observ_dim=observationCenterCount, device=device, seed=seed)
+            self.policy = RNN(genome, fftSize=fftSize, observationSize=observationSize, action_dim=2, 
+                              observ_dim=observationCenterCount, device=device, seed=seed)
 
     def set_eval_mode(self):
         self.eval_mode = True
     
-    def selectAction(self, eval_mode):
+    def selectAction(self, eval_mode, obs_only=False):
         state_seq_np = np.stack(self.lastPulseStates)
 
         observation_centers = self.getObservationCenters(len(state_seq_np))
 
-        (center_val, bw_val), self.currentScanOffsets = self.policy.select_action(
+        txAction, self.currentScanOffsets = self.policy.select_action(
             state_seq_np,
             observation_centers,
-            self.cpiIndex / self.cpiLen,
-            self.eval_mode
+            #self.cpiIndex / self.cpiLen,
+            1.0 if self.cpiIndex == 0 else 0.0,
+            self.eval_mode,
+            obs_only=obs_only
         )
+        
+        if not txAction == None:
+            (center_val, bw_val) = txAction
 
-        self.currentAction = self.continuous_action_to_interval(center=center_val, bandwidth=bw_val, bandwidthMax=self.observationSize)
+            self.currentAction = self.continuous_action_to_interval(center=center_val, bandwidth=bw_val, bandwidthMax=self.observationSize)
 
     
     def record_reward(self, reward):

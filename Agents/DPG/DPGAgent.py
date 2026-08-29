@@ -82,9 +82,13 @@ class DPGAgent(CognitiveAgent):
         max_bw=128,
         noise_std=0.1,
         cpiLen=256,
-        startIndex=0
+        startIndex=0,
+        binSize=10.24, 
+        startingFrequency=2400,
+        pulsesPerAction=1
     ):
-        super().__init__(fftSize=fftSize, cpiLen=cpiLen, startIndex=startIndex)
+        super().__init__(fftSize=fftSize, cpiLen=cpiLen, startIndex=startIndex, binSize=binSize, 
+                         startingFrequency=startingFrequency, pulsesPerAction=pulsesPerAction)
         self.device = device
         self.max_bw = max_bw
 
@@ -113,7 +117,7 @@ class DPGAgent(CognitiveAgent):
         # simulator compatibility
         self.lastAction = None
 
-    def selectAction(self, eval_mode):
+    def selectAction(self, eval_mode, obs_only=False):
         self.state_t = self.lastPulseStates[-1].astype(np.float32)
         
         obs_seq_np = np.stack(self.lastPulseStates)

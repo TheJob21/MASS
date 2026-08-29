@@ -9,51 +9,45 @@ class RecurrentSpectrumPPO(nn.Module):
     def __init__(
         self,
         observationSize=1024,
-        d_model=128,
+        spectrum_dim=128,
         lstm_hidden=128,
         action_dim=5,
-        num_heads=4,
+        num_heads=3,
         num_snapshots=20
     ):
         super().__init__()
         self.action_dim = action_dim
+        attention_dim = spectrum_dim + 1
         
         # Intra-pulse encoder
-        self.embedding = nn.Linear(observationSize, d_model)
-        
-        # NEW: Center-frequency embedding
-        self.observation_center_embedding = nn.Sequential(
-            nn.Linear(1, d_model),
-            nn.ReLU(),
-            nn.Linear(d_model, d_model)
-        )
+        self.embedding = nn.Linear(observationSize, spectrum_dim)
 
         # ✅ Learnable positional encoding for 20 snapshots
-        self.pos_embedding = nn.Parameter(
-            torch.zeros(1, num_snapshots, d_model)
-        )
+        self.pos_embedding = nn.Parameter(torch.zeros(1, num_snapshots, attention_dim))
         
         # Intra-decision temporal attention (over 20 snapshots)
         self.snapshot_attn = nn.MultiheadAttention(
-            embed_dim=d_model,
+            embed_dim=attention_dim,
             num_heads=num_heads,
             batch_first=True
         )
 
-        self.attn_norm = nn.LayerNorm(d_model)
+        self.attn_norm = nn.LayerNorm(attention_dim)
 
 
         # Temporal memory across decisions
         self.lstm = nn.LSTM(
-            input_size=d_model + self.action_dim + 1, # Action and CPI Index added here
+            input_size=spectrum_dim + self.action_dim + 2, # Action and CPI Index added here
             hidden_size=lstm_hidden,
             batch_first=True
         )
 
         # Actor head
-        self.mu = nn.Linear(lstm_hidden, self.action_dim)
+        self.tx_mu = nn.Linear(lstm_hidden, 2)
+        self.tx_log_std = nn.Linear(lstm_hidden, 2)
 
-        self.log_std = nn.Linear(lstm_hidden, self.action_dim)
+        self.obs_mu = nn.Linear(lstm_hidden, self.action_dim-2)
+        self.obs_log_std = nn.Linear(lstm_hidden, self.action_dim-2)
 
         # Critic head
         self.value = nn.Linear(lstm_hidden, 1)
@@ -67,11 +61,6 @@ class RecurrentSpectrumPPO(nn.Module):
 
         # Positional embedding
         nn.init.normal_(self.pos_embedding, mean=0.0, std=0.02)
-
-        for layer in self.observation_center_embedding:
-            if isinstance(layer, nn.Linear):
-                nn.init.xavier_uniform_(layer.weight)
-                nn.init.zeros_(layer.bias)
 
         # Attention
         for name, p in self.snapshot_attn.named_parameters():
@@ -95,16 +84,23 @@ class RecurrentSpectrumPPO(nn.Module):
                         p[n//4:n//2] = 1.0
 
         # Actor
-        nn.init.orthogonal_(self.mu.weight, gain=0.01)
-        nn.init.zeros_(self.mu.bias)
-        bias = torch.zeros(self.action_dim)
+        nn.init.orthogonal_(self.tx_mu.weight, gain=0.01)
+        nn.init.zeros_(self.tx_mu.bias)
+        nn.init.orthogonal_(self.obs_mu.weight, gain=0.01)
+        nn.init.zeros_(self.obs_mu.bias)
+        bias = torch.zeros(2)
         bias[0] = -1.0
         bias[1] = 1.0
+        self.tx_mu.bias.data = bias
 
-        self.mu.bias.data = bias
+        bias = torch.zeros(self.action_dim-2)
+        self.obs_mu.bias.data = bias
 
-        nn.init.orthogonal_(self.log_std.weight, gain=0.01)
-        nn.init.constant_(self.log_std.bias, -1.0)
+        nn.init.orthogonal_(self.tx_log_std.weight, gain=0.01)
+        nn.init.constant_(self.tx_log_std.bias, -1.0)
+
+        nn.init.orthogonal_(self.obs_log_std.weight, gain=0.01)
+        nn.init.constant_(self.obs_log_std.bias, -1.0)
 
         # Critic
         nn.init.orthogonal_(self.value.weight, gain=1.0)
@@ -113,11 +109,9 @@ class RecurrentSpectrumPPO(nn.Module):
     def encode_pulse(self, pulse_seq, observationCenters):
 
         # Embed each snapshot
-        x = F.relu(self.embedding(pulse_seq))  # (B*T, 20, d_model)
+        x = F.relu(self.embedding(pulse_seq))  # (B*T, 20, spectrum_dim)
 
-        observation_center_embed = self.observation_center_embedding(observationCenters)
-
-        x = x + observation_center_embed
+        x = torch.cat([x, observationCenters], dim=-1)
 
         S = x.size(1)
         
@@ -158,17 +152,20 @@ class RecurrentSpectrumPPO(nn.Module):
             pulse_seq_batch,
             observationCenters
         )
-        encoded = encoded.view(B, T, -1)               # (B, T, d_model)
+        encoded = encoded.view(B, T, -1)               # (B, T, spectrum_dim)
 
         # ---- Then LSTM ----
         lstmInput = torch.cat([encoded, prevAction, cpiIndices], dim=-1)
         lstm_out, hidden = self.lstm(lstmInput, hidden)
 
-        mu = self.mu(lstm_out)
-        log_std = self.log_std(lstm_out)
+        tx_mu = self.tx_mu(lstm_out)
+        tx_log_std = self.tx_log_std(lstm_out)
+
+        obs_mu = self.obs_mu(lstm_out)
+        obs_log_std = self.obs_log_std(lstm_out)
         value = self.value(lstm_out)
 
-        return mu, log_std, value, hidden
+        return tx_mu, tx_log_std, obs_mu, obs_log_std, value, hidden
 
 class PPOAgent(CognitiveAgent):
     def __init__(self, 
@@ -195,19 +192,25 @@ class PPOAgent(CognitiveAgent):
         entropy_min=0.002,
         horizon=1024,
         seed=None, 
-        startIndex=0
+        startIndex=0,
+        binSize=10.24, 
+        startingFrequency=2400,
+        pulsesPerAction=1
     ):
-        super().__init__(currentAction=currentAction, fftSize=fftSize, cpiLen=cpiLen, iterationsPerPulse=iterationsPerPulse, observationCenterCount=scanOffsetCount, startIndex=startIndex)
+        super().__init__(currentAction=currentAction, fftSize=fftSize, cpiLen=cpiLen, 
+                         iterationsPerPulse=iterationsPerPulse, observationCenterCount=scanOffsetCount, 
+                         startIndex=startIndex, binSize=binSize, startingFrequency=startingFrequency, 
+                         pulsesPerAction=pulsesPerAction)
 
         # Initialize Weights of Critic
         self.torchRng = torch.Generator(device=device)
         if policy is None:
             if seed == None:
-                self.policy = RecurrentSpectrumPPO(observationSize=observationSize, action_dim=2+scanOffsetCount).to(device)
+                self.policy = RecurrentSpectrumPPO(observationSize=observationSize, action_dim=2+scanOffsetCount, num_snapshots=iterationsPerPulse*pulsesPerAction).to(device)
             else:
                 state = torch.random.get_rng_state()
                 torch.manual_seed(seed)
-                self.policy = RecurrentSpectrumPPO(observationSize=observationSize, action_dim=2+scanOffsetCount).to(device)
+                self.policy = RecurrentSpectrumPPO(observationSize=observationSize, action_dim=2+scanOffsetCount, num_snapshots=iterationsPerPulse*pulsesPerAction).to(device)
                 torch.random.set_rng_state(state)
                 
                 self.torchRng.manual_seed(seed)                
@@ -241,7 +244,8 @@ class PPOAgent(CognitiveAgent):
         # Rollout buffers
         self.states = []
         self.raw_actions = []
-        self.log_probs = []
+        self.tx_log_probs = []
+        self.obs_log_probs = []
         self.values = []
         self.rewards = []
         self.dones = []
@@ -255,11 +259,12 @@ class PPOAgent(CognitiveAgent):
         self.prevActions = []
         self.observationCenters = []
         self.cpiIndices = []
+        self.txDecisionFlags = []
         
     def resetHidden(self):
         self.hidden = None
 
-    def selectAction(self, eval_mode):
+    def selectAction(self, eval_mode, obs_only=False):
         """
         state_seq_np: (samples_per_pulse, 1024)
         """
@@ -295,41 +300,42 @@ class PPOAgent(CognitiveAgent):
                 offset / self.fftSize
                 for offset in self.currentScanOffsets
             )
-
-            prev_action_tensor = torch.tensor(
-                prev_action,
-                dtype=torch.float32,
-                device=self.device
-            ).view(1, 1, -1)
         else:
-            prev_action_tensor = torch.as_tensor(
-                [0] * (2 + self.observationCenterCount),
-                dtype=torch.float32,
-                device=self.device
-            ).view(1, 1, 2+self.observationCenterCount)
+            prev_action = [
+                0.0
+            ] * (2 + self.observationCenterCount)
         
+
+        prev_action_tensor = torch.tensor(
+            prev_action,
+            dtype=torch.float32,
+            device=self.device
+        ).view(1, 1, -1)
+
         # store current CPI index
         i_pulse_tensor = torch.tensor(
-            self.cpiIndex / self.cpiLen,  # normalized
+            #self.cpiIndex / self.cpiLen,
+            1.0 if self.cpiIndex == 0 else 0.0,
             dtype=torch.float32,
             device=self.device
         ).view(1, 1, 1)  # (B=1, T=1, 1)
 
         if not eval_mode:
+            self.txDecisionFlags.append(not obs_only)
+
             self.observationCenters.append(observationCenters)
             self.prevActions.append(prev_action_tensor)
             self.cpiIndices.append(i_pulse_tensor)
+
+            self.hiddens.append(
+                None if self.hidden is None else (
+                    self.hidden[0].detach(),
+                    self.hidden[1].detach()
+                )
+            )
         
         with torch.no_grad():
-
-            # store hidden BEFORE step
-            if not eval_mode:
-                self.hiddens.append(
-                    None if self.hidden is None else
-                    (self.hidden[0].detach(), self.hidden[1].detach())
-                )
-
-            mu, log_std, value, new_hidden = self.policy(
+            (tx_mu, tx_log_std, obs_mu, obs_log_std, value, new_hidden) = self.policy(
                 state_tensor,
                 prev_action_tensor,
                 observationCenters,
@@ -342,47 +348,147 @@ class PPOAgent(CognitiveAgent):
                 new_hidden[1].detach()
             )
 
-            mu = mu[:, -1]
-            log_std = torch.clamp(log_std[:, -1], -3, 0)
+            # Last temporal output
+            tx_mu = tx_mu[:, -1]
+            tx_log_std = torch.clamp(
+                tx_log_std[:, -1],
+                -3,
+                0
+            )
+
+            obs_mu = obs_mu[:, -1]
+            obs_log_std = torch.clamp(
+                obs_log_std[:, -1],
+                -3,
+                0
+            )
+
             value = value[:, -1]
 
-            std = log_std.exp()
+            tx_std = tx_log_std.exp()
+            obs_std = obs_log_std.exp()
 
             if eval_mode:
-                raw_action = mu
+                obs_raw_action = obs_mu
+                if not obs_only:
+                    tx_raw_action = tx_mu
+                else:
+                    tx_raw_action = None
             else:
-                dist = NormalWithRNG(mu, std)
-                raw_action = dist.sample(rng=self.torchRng)
-                log_prob = dist.log_prob(raw_action).sum(dim=-1)
+                obs_dist = NormalWithRNG(obs_mu, obs_std)
+                obs_raw_action = obs_dist.sample(rng=self.torchRng)
 
-                action = torch.tanh(raw_action)
-                log_prob -= torch.log(
-                    1 - action.pow(2) + 1e-6
+                # TX is only sampled when making a TX decision
+                if not obs_only:
+                    tx_dist = NormalWithRNG(tx_mu, tx_std)
+                    tx_raw_action = tx_dist.sample(rng=self.torchRng)
+                else:
+                    tx_raw_action = None
+
+            # Observation action
+            obs_action = torch.tanh(obs_raw_action)
+
+            offsets = obs_action[0]
+
+            self.currentScanOffsets = [
+                int(round(
+                    o.item() * (self.fftSize * 4 / 5)
+                ))
+                for o in offsets
+            ]
+
+            # TX action
+            if not obs_only:
+                
+                tx_action = torch.tanh(tx_raw_action)
+
+                center = tx_action[0, 0].item()
+
+                bandwidth = (
+                    tx_action[0, 1].item() + 1
+                ) / 2
+
+                start, stop = self.continuous_action_to_interval(
+                    center=center,
+                    bandwidth=bandwidth,
+                    bandwidthMax=self.observationSize
+                )
+
+                self.currentAction = (start, stop)
+
+            # PPO rollout storage
+            if not eval_mode:
+                # ----- Observation log probability -----
+                obs_log_prob = obs_dist.log_prob(
+                    obs_raw_action
                 ).sum(dim=-1)
 
-        action = torch.tanh(raw_action)
+                obs_log_prob -= torch.log(
+                    1 - obs_action.pow(2) + 1e-6
+                ).sum(dim=-1)
 
-        center = action[0, 0].item()
-        bandwidth = (action[0, 1].item() + 1) / 2
+                self.obs_log_probs.append(
+                    obs_log_prob.detach()
+                )
 
-        # Scan offsets between pulses when observation window is limited
-        offsets = action[0,2:]
-        self.currentScanOffsets = [
-            int(round(o.item() * (self.fftSize*4/5)))
-            for o in offsets
-        ]
+                # ----- TX log probability -----
+                if not obs_only:
+                    tx_log_prob = tx_dist.log_prob(
+                        tx_raw_action
+                    ).sum(dim=-1)
 
-        start, stop = self.continuous_action_to_interval(
-            center=center, bandwidth=bandwidth, bandwidthMax=self.observationSize
-        )
+                    tx_action = torch.tanh(
+                        tx_raw_action
+                    )
 
-        if not eval_mode:
-            self.states.append(state_tensor.squeeze(0))  # (1, S, 1024)
-            self.raw_actions.append(raw_action.detach())
-            self.log_probs.append(log_prob.detach())
-            self.values.append(value.detach())
+                    tx_log_prob -= torch.log(
+                        1 - tx_action.pow(2) + 1e-6
+                    ).sum(dim=-1)
 
-        self.currentAction = (start, stop)
+                    self.tx_log_probs.append(
+                        tx_log_prob.detach()
+                    )
+
+                else:
+
+                    # Important: maintain alignment with pulses.
+                    self.tx_log_probs.append(torch.zeros(
+                        1,
+                        dtype=torch.float32,
+                        device=self.device
+                    ))
+
+                # Store common rollout data
+                self.states.append(
+                    state_tensor.squeeze(0)
+                )
+
+                # I recommend storing the complete raw action,
+                # but it will only contain a meaningful TX action
+                # on TX decision pulses.
+                if not obs_only:
+                    stored_action = torch.cat(
+                        [tx_raw_action, obs_raw_action],
+                        dim=-1
+                    )
+                else:
+                    # Dummy TX values. They will be ignored during
+                    # the TX loss.
+                    stored_action = torch.cat(
+                        [
+                            torch.zeros_like(obs_raw_action[:, :2]),
+                            obs_raw_action
+                        ],
+                        dim=-1
+                    )
+
+                self.raw_actions.append(
+                    stored_action.detach()
+                )
+
+                self.values.append(
+                    value.detach()
+                )
 
     def store_reward(self, reward, done=False):
         self.rewards.append(float(reward))
@@ -399,52 +505,100 @@ class PPOAgent(CognitiveAgent):
         device = self.device
         H = len(self.rewards)
 
-        # ------------------------------------------------
         # Stack rollout
-        # ------------------------------------------------
-        states = torch.cat(self.states, dim=0).to(device)          # (H, S, 1024)
-        actions = torch.cat(self.raw_actions, dim=0)                # (H, 5)
-        old_log_probs = torch.cat(self.log_probs, dim=0)            # (H)
-        values = torch.cat(self.values, dim=0).squeeze(-1)          # (H)
-        prevActions = torch.cat(self.prevActions, dim=0).squeeze(1)            # (H,5)
+        states = torch.cat(self.states, dim=0).to(device)                                      # (H, S, F)
+
+        actions = torch.cat(self.raw_actions, dim=0).to(device)                                # (H, 2 + obs_dim)
+
+        values = torch.cat(self.values, dim=0).squeeze(-1).to(device)                          # (H)
+
+        prevActions = torch.cat(self.prevActions, dim=0).squeeze(1).to(device)                 # (H, action_dim)
+
         observationCenters = torch.cat(self.observationCenters, dim=0).to(device)
-        cpiIndices  = torch.cat(self.cpiIndices, dim=1)   # (H, 1)
-        
-        rewards = torch.tensor(self.rewards, dtype=torch.float32, device=device)
-        dones = torch.tensor(self.dones, dtype=torch.float32, device=device)
 
-        # ------------------------------------------------
-        # Compute bootstrap value
-        # ------------------------------------------------
+        cpiIndices = torch.cat(self.cpiIndices, dim=0).squeeze(1).to(device)                              # (H, 1)
+
+        rewards = torch.tensor(
+            self.rewards,
+            dtype=torch.float32,
+            device=device
+        )
+
+        dones = torch.tensor(
+            self.dones,
+            dtype=torch.float32,
+            device=device
+        )
+
+        # TX decision mask
+        txDecisionFlags = torch.tensor(self.txDecisionFlags, dtype=torch.bool, device=device)
+
+        # Old log probabilities
+        old_tx_log_probs = torch.cat( self.tx_log_probs, dim=0).to(device)
+        old_obs_log_probs = torch.cat(self.obs_log_probs, dim=0).to(device)
+
+        # Bootstrap value
         with torch.no_grad():
+            last_state = states[-1:].unsqueeze(0) # (1, 1, S, F)
 
-            last_state = states[-1:].unsqueeze(0)  # (1,1,S,1024)
-            last_prevAction = prevActions[-1].view(1,1,2+self.observationCenterCount)
-            last_observationCenters = observationCenters[-1:].unsqueeze(0)
-            last_cpiIndex = cpiIndices[-1,-1, :].unsqueeze(0).unsqueeze(0)  # (1,1,1)
+            last_prevAction = (prevActions[-1].view(1, 1, -1))
+
+            last_observationCenters = (observationCenters[-1:].unsqueeze(0))
+
+            last_cpiIndex = (cpiIndices[-1].view(1, 1, 1))
+
             last_hidden = self.hiddens[-1]
+            (_, _, _, _, next_value, _) = self.policy(
+                last_state,
+                last_prevAction,
+                last_observationCenters,
+                last_cpiIndex,
+                last_hidden
+            )
 
-            _, _, next_value, _ = self.policy(last_state, last_prevAction, last_observationCenters, last_cpiIndex, last_hidden)
-            next_value = next_value[:, -1].squeeze(-1)
+            next_value = (
+                next_value[:, -1]
+                .squeeze(-1)
+            )
 
-        # ------------------------------------------------
         # GAE
-        # ------------------------------------------------
         advantages = torch.zeros_like(values)
-        gae = 0
+
+        gae = torch.zeros(1, device=device)
 
         for t in reversed(range(H)):
-            delta = rewards[t] + self.gamma * next_value * (1 - dones[t]) - values[t]
-            gae = delta + self.gamma * self.lam * (1 - dones[t]) * gae
+            delta = (
+                rewards[t]
+                + self.gamma * next_value * (1.0 - dones[t])
+                - values[t]
+            )
+
+            gae = (
+                delta
+                + self.gamma
+                * self.lam
+                * (1.0 - dones[t])
+                * gae
+            )
+
             advantages[t] = gae
+
             next_value = values[t]
 
         returns = advantages + values
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        # ------------------------------------------------
-        # Convert rollout into sequences
-        # ------------------------------------------------
+        # Normalize advantages globally
+        advantages = (
+            advantages - advantages.mean()
+        ) / (
+            advantages.std() + 1e-8
+        )
+
+        # Split actions
+        tx_actions = actions[:, :2]
+        obs_actions = actions[:, 2:]
+
+        # Convert rollout into BPTT sequences
         seq_len = self.bptt_chunk
         num_seq = H // seq_len
 
@@ -455,46 +609,91 @@ class PPOAgent(CognitiveAgent):
 
         states = states[:usable]
         actions = actions[:usable]
-        old_log_probs = old_log_probs[:usable]
+
+        tx_actions = tx_actions[:usable]
+        obs_actions = obs_actions[:usable]
+
+        old_tx_log_probs = old_tx_log_probs[:usable]
+        old_obs_log_probs = old_obs_log_probs[:usable]
+
+        values = values[:usable]
         advantages = advantages[:usable]
         returns = returns[:usable]
+
         prevActions = prevActions[:usable]
         observationCenters = observationCenters[:usable]
-        cpiIndices  = cpiIndices[:usable].view(num_seq, seq_len, -1)   # (N,T,1)
-        
-        states = states.view(num_seq, seq_len, *states.shape[1:])      # (N,T,S,1024)
-        actions = actions.view(num_seq, seq_len, -1)                   # (N,T,2)
-        old_log_probs = old_log_probs.view(num_seq, seq_len)
+        cpiIndices = cpiIndices[:usable]
+
+        txDecisionFlags = txDecisionFlags[:usable]
+
+        # Reshape
+        states = states.view(num_seq, seq_len, *states.shape[1:])
+        # (N, T, S, F)
+
+        actions = actions.view(num_seq, seq_len, -1)
+        tx_actions = tx_actions.view(num_seq, seq_len, 2)
+        obs_actions = obs_actions.view(num_seq, seq_len, self.observationCenterCount)
+        old_tx_log_probs = old_tx_log_probs.view(num_seq, seq_len)
+        old_obs_log_probs = old_obs_log_probs.view(num_seq, seq_len)
+        values = values.view(num_seq, seq_len)
         advantages = advantages.view(num_seq, seq_len)
         returns = returns.view(num_seq, seq_len)
-        prevActions = prevActions.view(num_seq, seq_len, -1)           # (N,T,2)
-        observationCenters = observationCenters.view(num_seq, seq_len, observationCenters.shape[1], observationCenters.shape[2])
-        cpiIndices = cpiIndices.view(num_seq, seq_len, -1)           # (N,T,2)
+        prevActions = prevActions.view(num_seq, seq_len, -1)
 
-        # ------------------------------------------------
-        # PPO training
-        # ------------------------------------------------
-        entropy_total = 0
+        observationCenters = observationCenters.view(
+            num_seq,
+            seq_len,
+            observationCenters.shape[2],
+            observationCenters.shape[3]
+        )
+
+        cpiIndices = cpiIndices.view(num_seq, seq_len, -1)
+
+        txDecisionFlags = txDecisionFlags.view(num_seq, seq_len)
+
+        # PPO optimization
+        entropy_total = 0.0
         entropy_count = 0
+
         for _ in range(self.num_epochs):
+            perm = torch.randperm(
+                num_seq,
+                generator=self.torchRng,
+                device=device
+            )
 
-            perm = torch.randperm(num_seq, generator=self.torchRng)
+            for start in range(
+                0,
+                num_seq,
+                self.batch_size
+            ):
 
-            for start in range(0, num_seq, self.batch_size):
+                idx = perm[
+                    start:start + self.batch_size
+                ]
 
-                idx = perm[start:start + self.batch_size]
+                state_batch = states[idx]
+                tx_action_batch = tx_actions[idx]
+                obs_action_batch = obs_actions[idx]
 
-                state_batch = states[idx].to(device)           # (B,T,S,1024)
-                action_batch = actions[idx].to(device)
-                old_log_batch = old_log_probs[idx].to(device)
-                adv_batch = advantages[idx].to(device)
-                return_batch = returns[idx].to(device)
-                prev_batch = prevActions[idx].to(device)
-                observationCenters_batch = observationCenters[idx].to(device)
-                cpiIndices_batch = cpiIndices[idx].to(device)
+                old_tx_log_batch = (old_tx_log_probs[idx])
+
+                old_obs_log_batch = (old_obs_log_probs[idx])
+
+                adv_batch = advantages[idx]
+                return_batch = returns[idx]
+
+                prev_batch = prevActions[idx]
+
+                observationCenters_batch = (observationCenters[idx])
+
+                cpiIndices_batch = (cpiIndices[idx])
+
+                tx_mask = txDecisionFlags[idx]
+
+                # Start each BPTT sequence with no hidden state
                 hidden = None
-
-                mu, log_std, value_pred, _ = self.policy(
+                (tx_mu, tx_log_std, obs_mu, obs_log_std, value_pred, _) = self.policy(
                     state_batch,
                     prev_batch,
                     observationCenters_batch,
@@ -502,70 +701,201 @@ class PPOAgent(CognitiveAgent):
                     hidden
                 )
 
-                log_std = torch.clamp(log_std, -3, 0)
-                std = log_std.exp()
+                # Distribution parameters
+                tx_log_std = torch.clamp(tx_log_std, -3, 0)
 
-                dist = NormalWithRNG(mu, std)
+                obs_log_std = torch.clamp(obs_log_std, -3, 0)
 
-                new_log_prob = dist.log_prob(action_batch).sum(dim=-1)
+                tx_std = tx_log_std.exp()
+                obs_std = obs_log_std.exp()
 
-                tanh_action = torch.tanh(action_batch)
-                new_log_prob -= torch.log(
-                    1 - tanh_action.pow(2) + 1e-6
+                tx_dist = NormalWithRNG(tx_mu, tx_std)
+
+                obs_dist = NormalWithRNG(obs_mu, obs_std)
+
+                # Observation PPO loss
+                new_obs_log_prob = (
+                    obs_dist.log_prob(
+                        obs_action_batch
+                    ).sum(dim=-1)
+                )
+
+                obs_tanh_action = torch.tanh(obs_action_batch)
+
+                new_obs_log_prob -= torch.log(
+                    1.0
+                    - obs_tanh_action.pow(2)
+                    + 1e-6
                 ).sum(dim=-1)
 
-                ratio = torch.exp(new_log_prob - old_log_batch)
+                obs_ratio = torch.exp(
+                    new_obs_log_prob
+                    - old_obs_log_batch
+                )
 
-                surr1 = ratio * adv_batch
-                surr2 = torch.clamp(
-                    ratio,
-                    1 - self.clip_eps,
-                    1 + self.clip_eps
-                ) * adv_batch
+                obs_surr1 = (
+                    obs_ratio
+                    * adv_batch
+                )
 
-                policy_loss = -torch.min(surr1, surr2).mean()
+                obs_surr2 = (
+                    torch.clamp(
+                        obs_ratio,
+                        1.0 - self.clip_eps,
+                        1.0 + self.clip_eps
+                    )
+                    * adv_batch
+                )
 
+                obs_policy_loss = (
+                    -torch.min(
+                        obs_surr1,
+                        obs_surr2
+                    ).mean()
+                )
+
+                # TX PPO loss
+                new_tx_log_prob = (
+                    tx_dist.log_prob(
+                        tx_action_batch
+                    ).sum(dim=-1)
+                )
+
+                tx_tanh_action = torch.tanh(tx_action_batch)
+
+                new_tx_log_prob -= torch.log(
+                    1.0
+                    - tx_tanh_action.pow(2)
+                    + 1e-6
+                ).sum(dim=-1)
+
+                tx_ratio = torch.exp(
+                    new_tx_log_prob
+                    - old_tx_log_batch
+                )
+
+                tx_surr1 = (
+                    tx_ratio
+                    * adv_batch
+                )
+
+                tx_surr2 = (
+                    torch.clamp(
+                        tx_ratio,
+                        1.0 - self.clip_eps,
+                        1.0 + self.clip_eps
+                    )
+                    * adv_batch
+                )
+
+                tx_policy_loss_per_step = (
+                    -torch.min(
+                        tx_surr1,
+                        tx_surr2
+                    )
+                )
+
+                # Only TX-decision pulses contribute to TX loss.
+                if tx_mask.any():
+                    tx_policy_loss = (
+                        tx_policy_loss_per_step[
+                            tx_mask
+                        ].mean()
+                    )
+                else:
+                    # Keep gradient graph valid
+                    tx_policy_loss = (
+                        tx_policy_loss_per_step.sum()
+                        * 0.0
+                    )
+
+                # Critic
                 value_loss = 0.5 * F.mse_loss(
                     value_pred.squeeze(-1),
                     return_batch
                 )
 
-                entropy = dist.entropy().sum(dim=-1).mean()
+                # Entropy
+                obs_entropy = (
+                    obs_dist
+                    .entropy()
+                    .sum(dim=-1)
+                    .mean()
+                )
+
+                tx_entropy_per_step = (
+                    tx_dist
+                    .entropy()
+                    .sum(dim=-1)
+                )
+
+                if tx_mask.any():
+                    tx_entropy = (
+                        tx_entropy_per_step[
+                            tx_mask
+                        ].mean()
+                    )
+                else:
+                    tx_entropy = (
+                        tx_entropy_per_step.sum()
+                        * 0.0
+                    )
+
+                entropy = (
+                    obs_entropy
+                    + tx_entropy
+                )
+
                 entropy_total += entropy.item()
                 entropy_count += 1
 
-                loss = policy_loss + value_loss - self.entropy_coef * entropy
+                # Total loss
+                loss = (
+                    obs_policy_loss
+                    + tx_policy_loss
+                    + value_loss
+                    - self.entropy_coef * entropy
+                )
 
+                # Backpropagation
                 self.optimizer.zero_grad()
+
                 loss.backward()
 
-                torch.nn.utils.clip_grad_norm_(
-                    self.policy.parameters(), 0.5
-                )
+                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
 
                 self.optimizer.step()
 
+                # Learning-rate scheduler
                 if self.scheduler is not None:
                     self.scheduler.step()
 
+                # Entropy decay
                 self.entropy_coef = max(
-                    self.entropy_coef * self.entropy_decay,
+                    self.entropy_coef
+                    * self.entropy_decay,
                     self.entropy_min
                 )
-        # print("Entropy:", entropy_total / entropy_count)
-        # ------------------------------------------------
-        # Clear buffers
-        # ------------------------------------------------
+
+        # Clear rollout
         self.states.clear()
         self.raw_actions.clear()
-        self.log_probs.clear()
+
+        self.tx_log_probs.clear()
+        self.obs_log_probs.clear()
+
         self.values.clear()
+
         self.rewards.clear()
         self.dones.clear()
+
         self.hiddens.clear()
+
         self.prevActions.clear()
         self.observationCenters.clear()
         self.cpiIndices.clear()
+
+        self.txDecisionFlags.clear()
 
     def save(self, path):
 

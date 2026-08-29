@@ -75,15 +75,25 @@ class Rewards():
                     cogAgent.collisions.append(collision_bins * binSize)
 
                     rewardSpectrum = config.REWARD['transmission_weight'] * cleanTxFrac - config.REWARD['collision_weight'] * collisionFrac
-                    
-                    avgCenterFreq = cogAgent.getAveCenterFreqForCPI()
-                    avgBW = cogAgent.getAveBwForCPI()
-                    agentCenterFreq, agentBW = cogAgent.curActionAsCenterFreqBW(binSize, startingFrequency)
-                    deltaBW = abs(agentBW - avgBW)
-                    deltaCenterFreq = abs(agentCenterFreq - avgCenterFreq)
-                    
-                    rewardAdapt = (config.REWARD['bandwidth_distortion'] * deltaBW / channelBandwidth) + (config.REWARD['center_distortion'] * deltaCenterFreq / channelBandwidth)
 
+                    
+                    rewardAdapt = 0
+                    if cogAgent.cpiIndex-1 == 0: # cpiIndex is incremented after being stored, so use previous cpiIndex
+                        bwBinSize = cogAgent.currentAction[1] - cogAgent.currentAction[0]
+                        idealBwSize = min(getLargestEmptySpace(binOwnership, agent_id), config.OBSERVATION_BIN_SIZE)
+                        utilization = min(bwBinSize / max(idealBwSize, 1.0), 1.0)
+                        rewardAdapt = (1.0 - utilization) * config.REWARD['deadspace_penalty_scale']
+                    else:
+                        anchorCenterFreq = cogAgent.anchorAction[0]
+                        anchorBw = cogAgent.anchorAction[1]
+                        # avgCenterFreq = cogAgent.getAveCenterFreqForCPI()
+                        # avgBW = cogAgent.getAveBwForCPI()
+                        agentCenterFreq, agentBW = cogAgent.curActionAsCenterFreqBW()
+                        deltaBW = abs(agentBW - anchorBw) / channelBandwidth
+                        deltaCenterFreq = abs(agentCenterFreq - anchorCenterFreq) / channelBandwidth
+                        
+                        rewardAdapt = (config.REWARD['bandwidth_distortion'] * deltaBW ** 2) + (config.REWARD['center_distortion'] * deltaCenterFreq ** 2)
+                        
                     reward = rewardSpectrum - rewardAdapt
                 # else: # Listening but not transmitting
                 #     left_overflow = max(0, -raw_start)
@@ -116,3 +126,17 @@ class Rewards():
                 #     reward -= (collisionFrac * (config.REWARD['collision_weight'] / 30))
 
             cogAgent.storeReward(reward)
+
+def getLargestEmptySpace(binOwnership, agent_id):
+    available = (binOwnership == 0) | (binOwnership == agent_id)
+
+    padded = np.concatenate([[False], available, [False]])
+    changes = np.diff(padded.astype(np.int8))
+
+    starts = np.where(changes == 1)[0]
+    stops = np.where(changes == -1)[0]
+
+    if len(starts) == 0:
+        return 0
+
+    return int(np.max(stops - starts))

@@ -2,12 +2,16 @@ from Agents.CognitiveAgent import CognitiveAgent
 import numpy as np
 
 class FixedStartAgent(CognitiveAgent):
-    def __init__(self, currentAction=None, fftSize=1024, cpiLen=256, rng=None, startIndex=0):
-        super().__init__(currentAction, fftSize, cpiLen, startIndex=startIndex)
+    def __init__(self, currentAction=None, fftSize=1024, cpiLen=256, rng=None, startIndex=0, 
+                 binSize=10.24, startingFrequency=2400, pulsesPerAction=1):
+        
+        super().__init__(currentAction, fftSize, cpiLen, startIndex=startIndex, binSize=binSize, 
+                         startingFrequency=startingFrequency, pulsesPerAction=pulsesPerAction)
+        
         if currentAction==None:
             self.takeRandomAction(rng=rng)
         
-    def selectAction(self, eval_mode):
+    def selectAction(self, eval_mode, obs_only=False):
         pass
 
     def takeRandomAction(self, rng=None, min_true=102, max_true=306):

@@ -76,9 +76,7 @@ class SpectrumDQN(nn.Module):
         x = F.relu(self.embedding(observations))
 
         # Embed observation center
-        center_embed = self.observation_center_embedding(
-            observationCenters
-        )
+        center_embed = self.observation_center_embedding(observationCenters)
 
         # Fuse information
         x = x + center_embed

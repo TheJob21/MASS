@@ -6,8 +6,8 @@ MULTI_AGENT = True
 EVAL_MODE = False
 RANDOM_START_INDICES = True
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-SEED = 42069
+DEVICE = "cpu" # "cuda" if torch.cuda.is_available() else "cpu"
+SEED = 42869
 
 CHECKPOINT_DIR = "Agents/Checkpoints"
 LOAD_CHECKPOINTS = False
@@ -58,15 +58,15 @@ HOCAE_PFA = 1e-2
 # AGENT COUNTS
 AGENTS = {
     "static": {
-        "fat": 2,
-        "skinny": 3,
-        "pulsed": 5,
+        "fat": 0,
+        "skinny": 0,
+        "pulsed": 0,
         "rectangular": 0
     },
-    "random_start": 0,
+    "random_start": 2,
     "saa": 0,
-    "ppo": 0,
-    "dqn": 0,
+    "ppo": 1,
+    "dqn": 1,
     "mfos": 1,
     "dpg": 0,
     "ablated_mfos": 1
@@ -114,13 +114,13 @@ MFOS = {
 # collisionTransmissionTolRatio = 0.033
 
 REWARD = {
-    "collision_ratio": 0.02,#0.033,
+    "collision_ratio": 0.033,#0.033,
     "beta": 0.75,
     "transmission_weight": 1.0,
     "collision_weight": None,  # computed dynamically if needed
     "bandwidth_distortion": 0.3,
     "center_distortion": 0.3,
-    "deadspace_penalty_scale": 1.0
+    "deadspace_penalty_scale": 15.0
 }
 
 REWARD["collision_weight"] = (
@@ -135,10 +135,11 @@ if not LIMIT_OBSERVATION:
 OBSERVATION_CENTER_COUNT = 3
 
 # RUNTIME CONTROL
-ITERATIONS = 5_000_000
+ITERATIONS = 7_500_000
 SPECTRUM_SAMPLE_SIZE = 15_000
+PULSES_PER_ACTION = 8 # Every X pulses, choose new action
 
-EVAL_SPLIT = 0.8
+EVAL_SPLIT = 0.9
 PRINT_INTERVAL = 100_000
 
 TIMESTEP_US = 10.24

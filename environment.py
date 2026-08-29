@@ -12,7 +12,7 @@ from Agents.Control.SAAAgent import SAAAgent
 from Agents.PPO.PPOAgent import PPOAgent
 from Agents.DQN.DQNAgent import DQNAgent
 from Agents.DPG.DPGAgent import DPGAgent
-from Agents.Control.RandomStartAgent import FixedStartAgent
+from Agents.Control.FixedStartAgent import FixedStartAgent
 from Agents.MFOS.MFOSAgent import AblatedMFOSAgent
 from Agents.MFOS.MFOSAgent import MFOSAgent
 from rewards import Rewards
@@ -600,8 +600,11 @@ class Environment:
         randomStartAgents = []
         for randAgent in range(numRandomStartAgents):
             startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
-            randomStartAgents.append(FixedStartAgent(rng=randomStartAgentRNG, startIndex=startIndex))
-            randomStartAgents[randAgent].storeAction(randomStartAgents[randAgent].curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency))
+            randomStartAgents.append(FixedStartAgent(rng=randomStartAgentRNG, startIndex=startIndex, 
+                                                    binSize=self.cfg.BIN_SIZE, 
+                                                    startingFrequency=startingFrequency, 
+                                                    pulsesPerAction=self.cfg.PULSES_PER_ACTION))
+            randomStartAgents[randAgent].storeAction(randomStartAgents[randAgent].curActionAsCenterFreqBW())
 
             allCogAgents.append(randomStartAgents[randAgent])
             
@@ -610,7 +613,9 @@ class Environment:
         saaAgents = []
         for saaAgent in range(numSaaAgents):
             startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
-            saaAgents.append(SAAAgent(startIndex=startIndex))
+            saaAgents.append(SAAAgent(startIndex=startIndex, binSize=self.cfg.BIN_SIZE, 
+                                      startingFrequency=startingFrequency, 
+                                      pulsesPerAction=self.cfg.PULSES_PER_ACTION))
             allCogAgents.append(saaAgents[saaAgent])
             
         # PPO Agent Parameters
@@ -629,20 +634,23 @@ class Environment:
 
             startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
             ppoAgents.append(PPOAgent(fftSize=self.cfg.FFT_SIZE,
-                                      observationSize=self.cfg.OBSERVATION_BIN_SIZE,
-                                      cpiLen=self.cfg.CPI_LEN, 
-                                      iterationsPerPulse=iterationsInPulse,
-                                      scanOffsetCount=self.cfg.OBSERVATION_CENTER_COUNT,
-                                      device=self.cfg.DEVICE,
-                                      gamma=bestConfig.get("gamma"),
-                                      lam=bestConfig.get("lam"),
-                                      clip_eps=bestConfig.get("clip"),
-                                      lr=bestConfig.get("lr"),
-                                      batch_size=bestConfig.get("batch_size"),
-                                      bptt_chunk=bestConfig.get("bptt_chunk"),
-                                      entropy_coef=bestConfig.get("entropy_coef"),
-                                      seed=ppoSeed+ppoAgent,
-                                      startIndex=startIndex))
+                                    observationSize=self.cfg.OBSERVATION_BIN_SIZE,
+                                    cpiLen=self.cfg.CPI_LEN, 
+                                    iterationsPerPulse=iterationsInPulse,
+                                    scanOffsetCount=self.cfg.OBSERVATION_CENTER_COUNT,
+                                    device=self.cfg.DEVICE,
+                                    gamma=bestConfig.get("gamma"),
+                                    lam=bestConfig.get("lam"),
+                                    clip_eps=bestConfig.get("clip"),
+                                    lr=bestConfig.get("lr"),
+                                    batch_size=bestConfig.get("batch_size"),
+                                    bptt_chunk=bestConfig.get("bptt_chunk"),
+                                    entropy_coef=bestConfig.get("entropy_coef"),
+                                    seed=ppoSeed+ppoAgent,
+                                    startIndex=startIndex, 
+                                    binSize=self.cfg.BIN_SIZE, 
+                                    startingFrequency=startingFrequency, 
+                                    pulsesPerAction=self.cfg.PULSES_PER_ACTION))
             allCogAgents.append(ppoAgents[ppoAgent])
 
         # DQN Agent Parameters
@@ -691,7 +699,10 @@ class Environment:
                             gamma=bestConfig.get("gamma"),
                             lr=bestConfig.get("lr"), 
                             batch_size=bestConfig.get("batch_size"),
-                            startIndex=startIndex))
+                            startIndex=startIndex, 
+                            binSize=self.cfg.BIN_SIZE, 
+                            startingFrequency=startingFrequency, 
+                            pulsesPerAction=self.cfg.PULSES_PER_ACTION))
             allCogAgents.append(dqnAgents[dqnAgent])
 
         # M-FOS Agent Initialization
@@ -722,7 +733,10 @@ class Environment:
                 cpiLen=self.cfg.CPI_LEN, 
                 iterationsPerPulse=iterationsInPulse,
                 observationCenterCount=self.cfg.OBSERVATION_CENTER_COUNT,
-                startIndex=startIndex
+                startIndex=startIndex, 
+                binSize=self.cfg.BIN_SIZE, 
+                startingFrequency=startingFrequency, 
+                pulsesPerAction=self.cfg.PULSES_PER_ACTION
             )
             mfosAgents.append(mfosAgent)
             allCogAgents.append(mfosAgent)
@@ -732,7 +746,9 @@ class Environment:
         dpgAgents = []
         for i in range(numDpgAgents):
             startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
-            dpgAgents.append(DPGAgent(fftSize=self.cfg.FFT_SIZE, observationSize=self.cfg.OBSERVATION_BIN_SIZE, device=self.cfg.DEVICE, startIndex=startIndex))
+            dpgAgents.append(DPGAgent(fftSize=self.cfg.FFT_SIZE, observationSize=self.cfg.OBSERVATION_BIN_SIZE, 
+                                    device=self.cfg.DEVICE, startIndex=startIndex, binSize=self.cfg.BIN_SIZE, 
+                                    startingFrequency=startingFrequency, pulsesPerAction=self.cfg.PULSES_PER_ACTION))
             allCogAgents.append(dpgAgents[i])
 
         # Ablated M-FOS Agent Initialization
@@ -758,7 +774,10 @@ class Environment:
                 device=self.cfg.DEVICE,
                 genome=genome,
                 seed=mfosSeed + mfosAgentI + numMfosAgents, #42075 is good for random genomes and weights?
-                startIndex=startIndex
+                startIndex=startIndex, 
+                binSize=self.cfg.BIN_SIZE, 
+                startingFrequency=startingFrequency, 
+                pulsesPerAction=self.cfg.PULSES_PER_ACTION
             )
             ablatedMFOSAgents.append(ablatedMfosAgent)
             allCogAgents.append(ablatedMfosAgent)
@@ -797,7 +816,7 @@ class Environment:
                     for agent2 in allCogAgents:
                         if agent != agent2 and agent2.isTransmitting:
                             prevStateWithoutAgent = self.updateStateInterval(prevStateWithoutAgent, agent2.currentAction)
-                if self.cfg.LIMIT_OBSERVATION:
+                if self.cfg.LIMIT_OBSERVATION and not isinstance(agent, SAAAgent):
                     snapshot_idx = (
                         i - agent.startIndex
                     ) % iterationsInPulse
@@ -811,13 +830,16 @@ class Environment:
                     agent.lastPulseStates.append(prevStateWithoutAgent)
 
             # Generate actions for agents
-            for agentI, agent in enumerate(allCogAgents):
-                if i % iterationsInPulse == agent.startIndex: # every 204.8 usec
-                    if len(agent.lastPulseStates) == iterationsInPulse:
-                        agent.selectAction(eval_mode=self.cfg.EVAL_MODE)
-                        agent.storeAction(agent.curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency))
-                elif i % iterationsInPulse == ((agent.startIndex+1) % iterationsInPulse): # Pulse lasts one iteration, then listens for PRI duration
-                    allCogAgents[agentI].isTransmitting = False         
+            for agent in allCogAgents:
+                if len(agent.lastPulseStates) == agent.iterationsPerPulse:
+                    if i % agent.iterationsPerAction == agent.startIndex: # every 204.8 usec
+                        agent.selectAction(eval_mode=self.cfg.EVAL_MODE, obs_only=False)
+                        agent.storeAction(agent.curActionAsCenterFreqBW())
+                    elif i % agent.iterationsPerPulse == agent.startIndex:
+                        agent.selectAction(eval_mode=self.cfg.EVAL_MODE, obs_only=True)
+                        agent.storeAction(agent.curActionAsCenterFreqBW())
+                    elif i % agent.iterationsPerPulse == ((agent.startIndex+1) % agent.iterationsPerPulse): # Pulse lasts one iteration, then listens for PRI duration
+                        agent.isTransmitting = False
 
 
             # Static Agent Actions. Simulate frequency changes
@@ -875,10 +897,10 @@ class Environment:
                 startingFrequency=startingFrequency
             )
             
-            if not self.cfg.EVAL_MODE and i > 0 and len(allCogAgents) > 0 and len(allCogAgents[0].lastPulseStates) == iterationsInPulse: # every 204.8 usec
+            if not self.cfg.EVAL_MODE and i > 0 and len(allCogAgents) > 0 and len(allCogAgents[0].lastPulseStates) == allCogAgents[0].lastPulseStates.maxlen: # every 204.8 usec
                 # Update PPO Agents
                 for ppoAgent in ppoAgents:
-                    if len(ppoAgent.allRewards) > 0 and len(ppoAgent.pulseRewards) == 0:
+                    if len(ppoAgent.allRewards) > 0 and len(ppoAgent.actionRewards) == 0 and len(ppoAgent.pulseRewards) == 0:
                         ppoAgent.store_reward(
                             reward=ppoAgent.allRewards[-1],
                             done=False
@@ -886,10 +908,10 @@ class Environment:
                         ppoAgent.update()
                 # Update DQN Agents
                 for dqnAgent in dqnAgents:
-                    if len(dqnAgent.allRewards) > 0 and len(dqnAgent.pulseRewards) == 0:
+                    if len(dqnAgent.allRewards) > 0 and len(dqnAgent.actionRewards) == 0 and len(dqnAgent.pulseRewards) == 0:
 
                          # Calculate next observation centers from the next state
-                        nextObservationCenters = dqnAgent.getObservationCenters(iterationsInPulse)
+                        nextObservationCenters = dqnAgent.getObservationCenters(dqnAgent.iterationsPerPulse)
 
                         dqnAgent.buffer.push(
                             dqnAgent.state_t,
@@ -903,13 +925,13 @@ class Environment:
                         dqnAgent.train_step()
                 # Update M-FOS Agents  
                 for mfosAgent in mfosAgents:
-                    if len(mfosAgent.allRewards) > 0 and len(mfosAgent.pulseRewards) == 0:
+                    if len(mfosAgent.allRewards) > 0 and len(mfosAgent.actionRewards) == 0 and len(mfosAgent.pulseRewards) == 0:
                         mfosAgent.record_reward(reward=mfosAgent.allRewards[-1])
                         mfosAgent.update()
 
                 # Update DPG Agents:
                 for dpgAgent in dpgAgents:
-                    if len(dpgAgent.allRewards) > 0 and len(dpgAgent.pulseRewards) == 0:
+                    if len(dpgAgent.allRewards) > 0 and len(dpgAgent.actionRewards) == 0 and len(dpgAgent.pulseRewards) == 0:
                         dpgAgent.buffer.push(
                             dpgAgent.state_t,
                             dpgAgent.lastAction,
@@ -922,7 +944,7 @@ class Environment:
                 
                 # Update Ablated M-FOS Agents  
                 for ablatedMfosAgent in ablatedMFOSAgents:
-                    if len(ablatedMfosAgent.allRewards) > 0 and len(ablatedMfosAgent.pulseRewards) == 0:
+                    if len(ablatedMfosAgent.allRewards) > 0 and len(ablatedMfosAgent.actionRewards) == 0 and len(ablatedMfosAgent.pulseRewards) == 0:
                         ablatedMfosAgent.record_reward(reward=ablatedMfosAgent.allRewards[-1])
                         ablatedMfosAgent.update()
 
@@ -1142,7 +1164,7 @@ class Environment:
 
         # Agent Reward Mean over time plot
         plt.figure(figsize=(12, 8))
-        block = self.cfg.CPI_LEN
+        block = int(self.cfg.CPI_LEN / self.cfg.PULSES_PER_ACTION)
 
         for agent_type, agents, label_prefix in [
             ("RandomStart", randomStartAgents, "Random Start Agent"),
@@ -1473,7 +1495,9 @@ class Environment:
                                       batch_size=config.get("batch_size"),
                                       bptt_chunk=config.get("bptt_chunk"),
                                       entropy_coef=config.get("entropy_coef"),
-                                      seed=ppoSeed+ppoAgentI)
+                                      seed=ppoSeed+ppoAgentI, 
+                                      binSize=self.cfg.BIN_SIZE, 
+                                      startingFrequency=startingFrequency)
             ppoTrials.append({
                 "agent": agent,
                 "config": config
@@ -1511,7 +1535,9 @@ class Environment:
                             epsilon=config.get("epsilon"),
                             gamma=config.get("gamma"),
                             lr=config.get("lr"), 
-                            batch_size=config.get("batch_size"))
+                            batch_size=config.get("batch_size"), 
+                            binSize=self.cfg.BIN_SIZE, 
+                            startingFrequency=startingFrequency)
             dqnTrials.append({
                 "agent": agent,
                 "config": config
@@ -1538,7 +1564,9 @@ class Environment:
                 iterationsPerPulse=iterationsInPulse,
                 device=self.cfg.DEVICE,
                 genome=config,
-                seed=mfosSeed + mfosAgentI #42075 is good for random genomes and weights?
+                seed=mfosSeed + mfosAgentI, #42075 is good for random genomes and weights?
+                binSize=self.cfg.BIN_SIZE, 
+                startingFrequency=startingFrequency
             )
             ablatedMFOSTrials.append({
                 "agent": agent,
@@ -1631,7 +1659,7 @@ class Environment:
                 if i % iterationsInPulse == 0: # every 204.8 usec
                     if len(agent.lastPulseStates) == iterationsInPulse:
                         agent.selectAction(eval_mode=self.cfg.EVAL_MODE)
-                        agent.storeAction(agent.curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency))
+                        agent.storeAction(agent.curActionAsCenterFreqBW())
                 elif i % iterationsInPulse == 1: # Pulse lasts one iteration, then listens for PRI duration
                     agent.isTransmitting = False
             for trial in dqnTrials:
@@ -1639,7 +1667,7 @@ class Environment:
                 if i % iterationsInPulse == 0: # every 204.8 usec
                     if len(agent.lastPulseStates) == iterationsInPulse:
                         agent.selectAction(eval_mode=self.cfg.EVAL_MODE)
-                        agent.storeAction(agent.curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency))
+                        agent.storeAction(agent.curActionAsCenterFreqBW())
                 elif i % iterationsInPulse == 1: # Pulse lasts one iteration, then listens for PRI duration
                     agent.isTransmitting = False
             for trial in ablatedMFOSTrials:
@@ -1647,7 +1675,7 @@ class Environment:
                 if i % iterationsInPulse == 0: # every 204.8 usec
                     if len(agent.lastPulseStates) == iterationsInPulse:
                         agent.selectAction(eval_mode=self.cfg.EVAL_MODE)
-                        agent.storeAction(agent.curActionAsCenterFreqBW(self.cfg.BIN_SIZE, startingFrequency))
+                        agent.storeAction(agent.curActionAsCenterFreqBW())
                 elif i % iterationsInPulse == 1: # Pulse lasts one iteration, then listens for PRI duration
                     agent.isTransmitting = False   
 
