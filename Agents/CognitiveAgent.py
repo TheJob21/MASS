@@ -49,10 +49,7 @@ class CognitiveAgent(Agent, ABC):
             self.anchorAction = self.curActionAsCenterFreqBW()
 
             self.sumCenterFreqForCPI = 0
-            self.sumBwForCPI = 0
-
-        self.isTransmitting = False if newAction == None else True
-    
+            self.sumBwForCPI = 0    
 
         self.sumCenterFreqForCPI += newAction[0]
         self.sumBwForCPI += newAction[1]

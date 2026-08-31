@@ -463,22 +463,25 @@ class PPOAgent(CognitiveAgent):
                     state_tensor.squeeze(0)
                 )
 
-                # I recommend storing the complete raw action,
-                # but it will only contain a meaningful TX action
-                # on TX decision pulses.
+                # Store rollout action with a fixed shape:
+                # [TX action (2), observation action (observationCenterCount)]
+
                 if not obs_only:
                     stored_action = torch.cat(
                         [tx_raw_action, obs_raw_action],
                         dim=-1
                     )
                 else:
-                    # Dummy TX values. They will be ignored during
-                    # the TX loss.
+                    # No TX action was selected.
+                    # Store dummy TX values so every rollout entry has the same shape.
+                    dummy_tx_action = torch.zeros(
+                        (obs_raw_action.shape[0], 2),
+                        dtype=obs_raw_action.dtype,
+                        device=obs_raw_action.device
+                    )
+
                     stored_action = torch.cat(
-                        [
-                            torch.zeros_like(obs_raw_action[:, :2]),
-                            obs_raw_action
-                        ],
+                        [dummy_tx_action, obs_raw_action],
                         dim=-1
                     )
 
@@ -489,6 +492,12 @@ class PPOAgent(CognitiveAgent):
                 self.values.append(
                     value.detach()
                 )
+                if not obs_only:
+                    print(
+                        f"mu={tx_mu.cpu().numpy()}, "
+                        f"std={tx_std.cpu().numpy()}, "
+                        f"action={tx_action.cpu().numpy()}"
+                    )
 
     def store_reward(self, reward, done=False):
         self.rewards.append(float(reward))

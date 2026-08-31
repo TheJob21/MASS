@@ -540,6 +540,8 @@ class Environment:
         self.cfg.SEED += 1
         mfosSeed=self.cfg.SEED
         self.cfg.SEED += 1
+        ablatedMfosSeed=self.cfg.SEED
+        self.cfg.SEED += 1
         torch.Generator(device=self.cfg.DEVICE).manual_seed(self.cfg.SEED)
             
 
@@ -646,6 +648,7 @@ class Environment:
                                     batch_size=bestConfig.get("batch_size"),
                                     bptt_chunk=bestConfig.get("bptt_chunk"),
                                     entropy_coef=bestConfig.get("entropy_coef"),
+                                    horizon=1024 / self.cfg.PULSES_PER_ACTION,
                                     seed=ppoSeed+ppoAgent,
                                     startIndex=startIndex, 
                                     binSize=self.cfg.BIN_SIZE, 
@@ -773,7 +776,7 @@ class Environment:
                 observationCenterCount=self.cfg.OBSERVATION_CENTER_COUNT,
                 device=self.cfg.DEVICE,
                 genome=genome,
-                seed=mfosSeed + mfosAgentI + numMfosAgents, #42075 is good for random genomes and weights?
+                seed=ablatedMfosSeed + mfosAgentI, #42075 is good for random genomes and weights?
                 startIndex=startIndex, 
                 binSize=self.cfg.BIN_SIZE, 
                 startingFrequency=startingFrequency, 
@@ -835,7 +838,7 @@ class Environment:
                     if i % agent.iterationsPerAction == agent.startIndex: # every 204.8 usec
                         agent.selectAction(eval_mode=self.cfg.EVAL_MODE, obs_only=False)
                         agent.storeAction(agent.curActionAsCenterFreqBW())
-                    elif i % agent.iterationsPerPulse == agent.startIndex:
+                    elif i % agent.iterationsPerPulse == agent.startIndex and not agent.currentAction == None:
                         agent.selectAction(eval_mode=self.cfg.EVAL_MODE, obs_only=True)
                         agent.storeAction(agent.curActionAsCenterFreqBW())
                     elif i % agent.iterationsPerPulse == ((agent.startIndex+1) % agent.iterationsPerPulse): # Pulse lasts one iteration, then listens for PRI duration
