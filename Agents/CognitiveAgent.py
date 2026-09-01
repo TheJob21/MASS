@@ -51,6 +51,8 @@ class CognitiveAgent(Agent, ABC):
             self.sumCenterFreqForCPI = 0
             self.sumBwForCPI = 0    
 
+        self.isTransmitting = True
+        
         self.sumCenterFreqForCPI += newAction[0]
         self.sumBwForCPI += newAction[1]
 
