@@ -28,7 +28,13 @@ class FixedStartAgent(CognitiveAgent):
         stop = start + length
 
         self.currentAction = (start, stop)
-
+    
+    def storeAndUpdate(self):
+        pass
+    
+    def setEvalMode(self):
+        pass
+    
     def save(self, path):
         pass
 

@@ -15,12 +15,14 @@ from Agents.DPG.DPGAgent import DPGAgent
 from Agents.Control.FixedStartAgent import FixedStartAgent
 from Agents.MFOS.MFOSAgent import AblatedMFOSAgent
 from Agents.MFOS.MFOSAgent import MFOSAgent
+from Agents.AdversarialAgents.Adversary import Adversary
 from rewards import Rewards
 from signal_processing import SignalProcessor
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
 from matplotlib.ticker import FuncFormatter
 from Agents.Checkpoints.checkpoint_utils import load_agents, save_agents
+from collections import defaultdict
 
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
@@ -167,8 +169,13 @@ class Environment:
                 # Don't overwrite transmissions already drawn
                 observe = alpha_mask[left:right] < 1.0
 
-                state[left:right][observe] = agent_label
-                alpha_mask[left:right][observe] = 0.30
+                tmp = state[left:right]
+                tmp[observe] = agent_label
+                state[left:right] = tmp
+
+                tmp = alpha_mask[left:right]
+                tmp[observe] = 0.30
+                alpha_mask[left:right] = tmp
 
             # -------------------------------------------------
             # Transmission
@@ -357,6 +364,13 @@ class Environment:
                 else:
                     binOwnership[i] = 0
 
+    def enumerate_agents_by_class(self, cognitiveAgents):
+        counters = defaultdict(int)
+
+        for agent in cognitiveAgents:
+            class_name = agent.__class__.__name__
+            counters[class_name] += 1
+            yield agent, class_name, counters[class_name]
 
     def mean_std_every_n(self, rewards, n=4096):
         rewards = np.asarray(rewards)
@@ -523,15 +537,7 @@ class Environment:
 
         plt.show()
 
-    def run(self):
-        currentState = staticState = self.initState() # S
-        occupiedBwPerIteration = []
-        spectrumSampleSize=30_000
-        allStates = []
-        observationStates = []
-        deadspace = [] # MHz
-        staticAgentRNG = np.random.default_rng(self.cfg.SEED)
-        self.cfg.SEED += 1
+    def initializeCognitiveAgents(self, iterationsInPulse, startingFrequency):
         randomStartAgentRNG = np.random.default_rng(self.cfg.SEED)
         self.cfg.SEED += 1
         dqnSeed = self.cfg.SEED
@@ -542,88 +548,34 @@ class Environment:
         self.cfg.SEED += 1
         ablatedMfosSeed=self.cfg.SEED
         self.cfg.SEED += 1
-        torch.Generator(device=self.cfg.DEVICE).manual_seed(self.cfg.SEED)
-            
 
-        liveDataFilename = self.cfg.SPECTRUM_FILES[self.cfg.DATA_CHOICE]
-        storedStateFile = self.cfg.STORED_STATE_MAP[liveDataFilename]
-        startingFrequency = self.cfg.STARTING_FREQUENCY_MAP[storedStateFile]
-
-        if not self.cfg.SIM_MODE and not os.path.exists(storedStateFile) and not os.path.exists(liveDataFilename):
-            print(f"Warning: files not found -> {storedStateFile} -> {liveDataFilename}")
-            self.cfg.SIM_MODE = True
-        
-        # If precomputed file exists, just load it
-        if not self.cfg.SIM_MODE:
-            if os.path.exists(storedStateFile):
-                npz = np.load(storedStateFile)
-                liveData = npz["states"]  # shape (num_samples, fftSize), dtype=bool
-                print("Loaded precomputed states:", liveData.shape)
-            else:
-                liveData = []
-                sp = SignalProcessor(self.cfg)
-                with open(liveDataFilename, "rb") as f:
-                    while True:
-                        state = sp.compute_state_from_file(f)
-                        if state is None:
-                            break
-                        liveData.append(state)
-                
-                liveData = np.stack(liveData)  # (num_samples, fftSize)
-                
-                # Save for future reuse
-                np.savez_compressed(storedStateFile, states=liveData)
-                print("Saved precomputed states:", liveData.shape)
-
-        iterations = self.cfg.ITERATIONS if self.cfg.SIM_MODE else liveData.shape[0]
-        timestep = pulseWidth = 10.24
-        iterationsInPulse = int(self.cfg.PRI / timestep)
-
-        allCogAgents = []
-
-        # Static Agents For Simulating Environment
-        staticAgents = []
-        numLargeAgents = self.cfg.AGENTS['static']['fat'] # pw .1 - .25K, interval 10K, 150-175 bins wide
-        numSkinnyAgents = self.cfg.AGENTS['static']['skinny'] # pw .25K, interval 2K, 20 bins wide
-        numPulsedAgents = self.cfg.AGENTS['static']['pulsed'] # pw .1K, interval = 4K, 30-40 bins wide on/off
-        numRectangleAgents = self.cfg.AGENTS['static']['rectangular'] # pw = 50, interval = 10 -250,  60-680 bins
-        numStaticAgents = numLargeAgents + numSkinnyAgents + numPulsedAgents + numRectangleAgents
-        for staticAgent in range(numLargeAgents):
-            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Fat, agentTypeIndex=staticAgent))
-        for staticAgent in range(numSkinnyAgents):
-            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Skinny, agentTypeIndex=staticAgent))
-        for staticAgent in range(numPulsedAgents):
-            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Pulsed, agentTypeIndex=staticAgent))
-        for staticAgent in range(numRectangleAgents):
-            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Rectangular, agentTypeIndex=staticAgent))
+        cognitiveAgents = []
 
         # Random Single Action Agent
         numRandomStartAgents = self.cfg.AGENTS['random_start']
-        randomStartAgents = []
-        for randAgent in range(numRandomStartAgents):
+        for _ in range(numRandomStartAgents):
             startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
-            randomStartAgents.append(FixedStartAgent(rng=randomStartAgentRNG, startIndex=startIndex, 
-                                                    binSize=self.cfg.BIN_SIZE, 
-                                                    startingFrequency=startingFrequency, 
-                                                    pulsesPerAction=self.cfg.PULSES_PER_ACTION))
-            randomStartAgents[randAgent].storeAction(randomStartAgents[randAgent].curActionAsCenterFreqBW())
-
-            allCogAgents.append(randomStartAgents[randAgent])
+            randAgent = FixedStartAgent(rng=randomStartAgentRNG, 
+                                        startIndex=startIndex, 
+                                        binSize=self.cfg.BIN_SIZE, 
+                                        startingFrequency=startingFrequency, 
+                                        pulsesPerAction=self.cfg.PULSES_PER_ACTION)
+            randAgent.storeAction(randAgent.curActionAsCenterFreqBW())
+            cognitiveAgents.append(randAgent)
             
         # SAA Agent Parameters
         numSaaAgents = self.cfg.AGENTS['saa'] # Sense-And-Avoid
-        saaAgents = []
-        for saaAgent in range(numSaaAgents):
+        for _ in range(numSaaAgents):
             startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
-            saaAgents.append(SAAAgent(startIndex=startIndex, binSize=self.cfg.BIN_SIZE, 
-                                      startingFrequency=startingFrequency, 
-                                      pulsesPerAction=self.cfg.PULSES_PER_ACTION))
-            allCogAgents.append(saaAgents[saaAgent])
+            saaAgent = SAAAgent(startIndex=startIndex, 
+                                binSize=self.cfg.BIN_SIZE, 
+                                startingFrequency=startingFrequency, 
+                                pulsesPerAction=self.cfg.PULSES_PER_ACTION)
+            cognitiveAgents.append(saaAgent)
             
         # PPO Agent Parameters
         numPpoAgents = self.cfg.AGENTS['ppo'] # Proximal Policy Optimization
-        ppoAgents = []
-        for ppoAgent in range(numPpoAgents):
+        for ppoAgentI in range(numPpoAgents):
             bestConfig = {
                 "lr": 3.62e-4,   # log-uniform
                 "gamma": 0.9514,                        # uniform
@@ -631,30 +583,30 @@ class Environment:
                 "clip": 0.277,
                 "entropy_coef": 0.04019,
                 "batch_size": 64,
-                "bptt_chunk": 16
+                "bptt_chunk": 20
             }
 
             startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
-            ppoAgents.append(PPOAgent(fftSize=self.cfg.FFT_SIZE,
-                                    observationSize=self.cfg.OBSERVATION_BIN_SIZE,
-                                    cpiLen=self.cfg.CPI_LEN, 
-                                    iterationsPerPulse=iterationsInPulse,
-                                    scanOffsetCount=self.cfg.OBSERVATION_CENTER_COUNT,
-                                    device=self.cfg.DEVICE,
-                                    gamma=bestConfig.get("gamma"),
-                                    lam=bestConfig.get("lam"),
-                                    clip_eps=bestConfig.get("clip"),
-                                    lr=bestConfig.get("lr"),
-                                    batch_size=bestConfig.get("batch_size"),
-                                    bptt_chunk=bestConfig.get("bptt_chunk"),
-                                    entropy_coef=bestConfig.get("entropy_coef"),
-                                    horizon=1024 / self.cfg.PULSES_PER_ACTION,
-                                    seed=ppoSeed+ppoAgent,
-                                    startIndex=startIndex, 
-                                    binSize=self.cfg.BIN_SIZE, 
-                                    startingFrequency=startingFrequency, 
-                                    pulsesPerAction=self.cfg.PULSES_PER_ACTION))
-            allCogAgents.append(ppoAgents[ppoAgent])
+            ppoAgent = PPOAgent(fftSize=self.cfg.FFT_SIZE,
+                                observationSize=self.cfg.OBSERVATION_BIN_SIZE,
+                                cpiLen=self.cfg.CPI_LEN, 
+                                iterationsPerPulse=iterationsInPulse,
+                                scanOffsetCount=self.cfg.OBSERVATION_CENTER_COUNT,
+                                device=self.cfg.DEVICE,
+                                gamma=bestConfig.get("gamma"),
+                                lam=bestConfig.get("lam"),
+                                clip_eps=bestConfig.get("clip"),
+                                lr=bestConfig.get("lr"),
+                                batch_size=bestConfig.get("batch_size"),
+                                bptt_chunk=bestConfig.get("bptt_chunk"),
+                                entropy_coef=bestConfig.get("entropy_coef"),
+                                horizon=int(1024 / self.cfg.PULSES_PER_ACTION),
+                                seed=ppoSeed+ppoAgentI,
+                                startIndex=startIndex, 
+                                binSize=self.cfg.BIN_SIZE, 
+                                startingFrequency=startingFrequency, 
+                                pulsesPerAction=self.cfg.PULSES_PER_ACTION)
+            cognitiveAgents.append(ppoAgent)
 
         # DQN Agent Parameters
         BANDWIDTHS = [96, 128, 160] #[32, 64, 96]
@@ -679,9 +631,7 @@ class Environment:
                 for obs_centers in itertools.combinations_with_replacement(OBSERVATION_CENTERS, self.cfg.OBSERVATION_CENTER_COUNT):
                     DQN_ACTIONS.append((start, stop, obs_centers))
         numDqnAgents = self.cfg.AGENTS['dqn']
-        dqnAgents = []
-        for dqnAgent in range(numDqnAgents):
-            
+        for dqnI in range(numDqnAgents):
             bestConfig = {
                 "lr": 4.42e-5,   # log-uniform
                 "gamma": 0.9281,                        # uniform
@@ -690,10 +640,10 @@ class Environment:
             }
             
             startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
-            dqnAgents.append(DQNAgent(actionList=DQN_ACTIONS,
+            dqnAgent = DQNAgent(actionList=DQN_ACTIONS,
                             fftSize=self.cfg.FFT_SIZE,
                             observationSize=self.cfg.OBSERVATION_BIN_SIZE,
-                            seed=dqnSeed+dqnAgent,
+                            seed=dqnSeed+dqnI,
                             cpiLen=self.cfg.CPI_LEN, 
                             iterationsPerPulse=iterationsInPulse, 
                             scanOffsetCount=self.cfg.OBSERVATION_CENTER_COUNT, 
@@ -705,12 +655,11 @@ class Environment:
                             startIndex=startIndex, 
                             binSize=self.cfg.BIN_SIZE, 
                             startingFrequency=startingFrequency, 
-                            pulsesPerAction=self.cfg.PULSES_PER_ACTION))
-            allCogAgents.append(dqnAgents[dqnAgent])
+                            pulsesPerAction=self.cfg.PULSES_PER_ACTION)
+            cognitiveAgents.append(dqnAgent)
 
         # M-FOS Agent Initialization
         numMfosAgents = self.cfg.AGENTS['mfos']
-        mfosAgents = []
         for mfosAgentI in range(numMfosAgents):
             base_genome = {
                 "lr": 2.82e-4,
@@ -741,22 +690,23 @@ class Environment:
                 startingFrequency=startingFrequency, 
                 pulsesPerAction=self.cfg.PULSES_PER_ACTION
             )
-            mfosAgents.append(mfosAgent)
-            allCogAgents.append(mfosAgent)
+            cognitiveAgents.append(mfosAgent)
 
         # DPG Agent Initialization
         numDpgAgents = self.cfg.AGENTS['dpg']
-        dpgAgents = []
-        for i in range(numDpgAgents):
+        for _ in range(numDpgAgents):
             startIndex = torch.randint(0, iterationsInPulse, (1,)).item() if self.cfg.RANDOM_START_INDICES else 0
-            dpgAgents.append(DPGAgent(fftSize=self.cfg.FFT_SIZE, observationSize=self.cfg.OBSERVATION_BIN_SIZE, 
-                                    device=self.cfg.DEVICE, startIndex=startIndex, binSize=self.cfg.BIN_SIZE, 
-                                    startingFrequency=startingFrequency, pulsesPerAction=self.cfg.PULSES_PER_ACTION))
-            allCogAgents.append(dpgAgents[i])
+            dpgAgent = DPGAgent(fftSize=self.cfg.FFT_SIZE, 
+                                observationSize=self.cfg.OBSERVATION_BIN_SIZE, 
+                                device=self.cfg.DEVICE, 
+                                startIndex=startIndex, 
+                                binSize=self.cfg.BIN_SIZE, 
+                                startingFrequency=startingFrequency, 
+                                pulsesPerAction=self.cfg.PULSES_PER_ACTION)
+            cognitiveAgents.append(dpgAgent)
 
         # Ablated M-FOS Agent Initialization
         numAblatedMfosAgents = self.cfg.AGENTS['ablated_mfos']
-        ablatedMFOSAgents = []
         for mfosAgentI in range(numAblatedMfosAgents):
             genome = {
                 "lr": 2.82e-4,
@@ -782,12 +732,92 @@ class Environment:
                 startingFrequency=startingFrequency, 
                 pulsesPerAction=self.cfg.PULSES_PER_ACTION
             )
-            ablatedMFOSAgents.append(ablatedMfosAgent)
-            allCogAgents.append(ablatedMfosAgent)
+            cognitiveAgents.append(ablatedMfosAgent)
 
         if self.cfg.LOAD_CHECKPOINTS:
-            load_agents(allCogAgents, self.cfg.CHECKPOINT_DIR, self.cfg.DEVICE)
+            load_agents(cognitiveAgents, self.cfg.CHECKPOINT_DIR, self.cfg.DEVICE)
 
+
+        return cognitiveAgents
+
+    def initializeStaticAgents(self):
+        staticAgentRNG = np.random.default_rng(self.cfg.SEED)
+        self.cfg.SEED += 1
+
+        staticAgents = []
+        for staticAgent in range(self.cfg.AGENTS['static']['fat']): # pw .1 - .25K, interval 10K, 150-175 bins wide
+            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Fat, agentTypeIndex=staticAgent))
+        for staticAgent in range(self.cfg.AGENTS['static']['skinny']): # pw .25K, interval 2K, 20 bins wide
+            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Skinny, agentTypeIndex=staticAgent))
+        for staticAgent in range(self.cfg.AGENTS['static']['pulsed']): # pw .1K, interval = 4K, 30-40 bins wide on/off
+            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Pulsed, agentTypeIndex=staticAgent))
+        for staticAgent in range(self.cfg.AGENTS['static']['rectangular']): # pw = 50, interval = 10 -250,  60-680 bins
+            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Rectangular, agentTypeIndex=staticAgent))
+
+        return staticAgents
+
+    def initializeAdversarialAgents(self, iterationsInPulse, startingFrequency):
+        adversarialAgents = []
+
+        for _ in range(self.cfg.AGENTS['adversary']):
+            adversarialAgent = Adversary(currentAction=None, 
+                                         fftSize=self.cfg.FFT_SIZE, 
+                                         iterationsPerPulse=iterationsInPulse, 
+                                         binSize=self.cfg.BIN_SIZE, 
+                                         startingFrequency=startingFrequency,
+                                         pulsesPerAction=self.cfg.PULSES_PER_ACTION)
+            adversarialAgents.append(adversarialAgent)
+
+        return adversarialAgents
+
+    def run(self):
+        currentState = staticState = self.initState() # S
+        occupiedBwPerIteration = []
+        spectrumSampleSize=30_000
+        allStates = []
+        observationStates = []
+        deadspace = [] # MHz
+        torch.Generator(device=self.cfg.DEVICE).manual_seed(self.cfg.SEED)
+        self.cfg.SEED += 1
+        
+        realDataFilename = self.cfg.SPECTRUM_FILES[self.cfg.DATA_CHOICE]
+        storedStateFile = self.cfg.STORED_STATE_MAP[realDataFilename]
+        startingFrequency = self.cfg.STARTING_FREQUENCY_MAP[storedStateFile]
+
+        if not self.cfg.SIM_MODE and not os.path.exists(storedStateFile) and not os.path.exists(realDataFilename):
+            print(f"Warning: files not found -> {storedStateFile} -> {realDataFilename}")
+            self.cfg.SIM_MODE = True
+        
+        # If precomputed file exists, just load it
+        if not self.cfg.SIM_MODE:
+            if os.path.exists(storedStateFile):
+                npz = np.load(storedStateFile)
+                realData = npz["states"]  # shape (num_samples, fftSize), dtype=bool
+                print("Loaded precomputed states:", realData.shape)
+            else:
+                realData = []
+                sp = SignalProcessor(self.cfg)
+                with open(realDataFilename, "rb") as f:
+                    while True:
+                        state = sp.compute_state_from_file(f)
+                        if state is None:
+                            break
+                        realData.append(state)
+                
+                realData = np.stack(realData)  # (num_samples, fftSize)
+                
+                # Save for future reuse
+                np.savez_compressed(storedStateFile, states=realData)
+                print("Saved precomputed states:", realData.shape)
+
+        iterations = self.cfg.ITERATIONS if self.cfg.SIM_MODE else realData.shape[0]
+        timestep = pulseWidth = 10.24
+        iterationsInPulse = int(self.cfg.PRI / timestep)
+
+        staticAgents = self.initializeStaticAgents() # Static Agents For Simulating Environment
+        cognitiveAgents = self.initializeCognitiveAgents(iterationsInPulse, startingFrequency)
+        adversarialAgents = self.initializeAdversarialAgents(iterationsInPulse, startingFrequency)
+        
         binOwnership = np.zeros(self.cfg.FFT_SIZE, dtype=np.int8) # 0=unowned, 1=staticOwner, 2+=cogUser
 
         spectrumSampleStartWindow = self.cfg.SPECTRUM_SAMPLE_SIZE
@@ -799,30 +829,21 @@ class Environment:
         for i in range(iterations): # 1 = 12.8 microseconds
             if not self.cfg.EVAL_MODE and i == int(iterations * self.cfg.EVAL_SPLIT):
                 self.cfg.EVAL_MODE = True
-                for ppoAgent in ppoAgents:
-                    ppoAgent.policy.eval()
-                for dqnAgent in dqnAgents:
-                    dqnAgent.policy.eval()
-                    dqnAgent.epsilon = 0.0
-                for mfosAgent in mfosAgents:
-                    mfosAgent.set_eval_mode()
-                for ablatedMfosAgent in ablatedMFOSAgents:
-                    ablatedMfosAgent.set_eval_mode()
+                for agent in cognitiveAgents:
+                    agent.setEvalMode()
                     
             if i % 100_000 == 0:
                 print(int(i/1000), "K iterations completed.")
             
             # store previous state space without the active agents action
-            for agent in allCogAgents:
+            for agent in cognitiveAgents:
                 prevStateWithoutAgent = staticState.copy()
                 if self.cfg.MULTI_AGENT:
-                    for agent2 in allCogAgents:
+                    for agent2 in cognitiveAgents:
                         if agent != agent2 and agent2.isTransmitting:
                             prevStateWithoutAgent = self.updateStateInterval(prevStateWithoutAgent, agent2.currentAction)
                 if self.cfg.LIMIT_OBSERVATION and not isinstance(agent, SAAAgent):
-                    snapshot_idx = (
-                        i - agent.startIndex
-                    ) % iterationsInPulse
+                    snapshot_idx = (i - agent.startIndex) % iterationsInPulse
                     offset_idx = min(
                         snapshot_idx * agent.observationCenterCount // iterationsInPulse,
                         agent.observationCenterCount-1
@@ -832,8 +853,11 @@ class Environment:
                 else:
                     agent.lastPulseStates.append(prevStateWithoutAgent)
 
+            for adversary in adversarialAgents:
+                adversary.lastPulseStates.append(currentState.copy())
+
             # Generate actions for agents
-            for agent in allCogAgents:
+            for agent in cognitiveAgents:
                 if len(agent.lastPulseStates) == agent.iterationsPerPulse:
                     if i % agent.iterationsPerAction == agent.startIndex: # every 204.8 usec
                         agent.selectAction(eval_mode=self.cfg.EVAL_MODE, obs_only=False)
@@ -844,6 +868,9 @@ class Environment:
                     elif i % agent.iterationsPerPulse == ((agent.startIndex+1) % agent.iterationsPerPulse): # Pulse lasts one iteration, then listens for PRI duration
                         agent.isTransmitting = False
 
+            # Generate actions for adversaries
+            for adversary in adversarialAgents:
+                adversary.selectAction()
 
             # Static Agent Actions. Simulate frequency changes
             currentState = self.initState()
@@ -851,14 +878,18 @@ class Environment:
                 staticAgent.iterateCurrentAction()
                 currentState = self.updateStateInterval(currentState, staticAgent.currentAction)
             
-            if self.cfg.SIM_MODE == False: # Use Live Data
-                currentState = currentState | liveData[i%len(liveData)]
-                
+            if self.cfg.SIM_MODE == False: # Use real Data
+                currentState = currentState | realData[i%len(realData)]
+
+            for adversary in adversarialAgents:
+                if adversary.isTransmitting:
+                    currentState = self.updateStateInterval(currentState, adversary.currentAction)
+                        
             staticState = currentState.copy()
             
             # Update state
             if self.cfg.MULTI_AGENT:
-                for agent in allCogAgents:
+                for agent in cognitiveAgents:
                     if agent.isTransmitting:
                         currentState = self.updateStateInterval(currentState, agent.currentAction)
             occupiedBwPerIteration.append(np.sum(currentState) * self.cfg.BIN_SIZE)
@@ -866,7 +897,7 @@ class Environment:
             self.updateBinOwnership(
                 binOwnership=binOwnership, 
                 staticState=staticState, 
-                cognitiveAgents=allCogAgents
+                cognitiveAgents=cognitiveAgents
             )
             # Only build labeled state during sampling period
             if (
@@ -876,12 +907,12 @@ class Environment:
             ): 
                 allStates.append(self.build_labeled_state(
                     staticState=staticState,
-                    listOfAgents=allCogAgents,
+                    listOfAgents=cognitiveAgents,
                     binOwnership=binOwnership
                 ))
                 observationStates.append(self.build_observation_state(
                     staticState=staticState,
-                    listOfAgents=allCogAgents,
+                    listOfAgents=cognitiveAgents,
                     iteration=i,
                     iterationsInPulse=iterationsInPulse
                 ))
@@ -894,83 +925,19 @@ class Environment:
 
             # Compute reward for cognitive agents
             Rewards.computeRewardsForAgents(
-                cognitiveAgents=allCogAgents,
+                cognitiveAgents=cognitiveAgents,
                 binOwnership=binOwnership,
                 config=self.cfg,
                 startingFrequency=startingFrequency
             )
             
-            if not self.cfg.EVAL_MODE and i > 0 and len(allCogAgents) > 0 and len(allCogAgents[0].lastPulseStates) == allCogAgents[0].lastPulseStates.maxlen: # every 204.8 usec
-                # Update PPO Agents
-                for ppoAgent in ppoAgents:
-                    if len(ppoAgent.allRewards) > 0 and len(ppoAgent.actionRewards) == 0 and len(ppoAgent.pulseRewards) == 0:
-                        ppoAgent.store_reward(
-                            reward=ppoAgent.allRewards[-1],
-                            done=False
-                        )
-                        ppoAgent.update()
-                # Update DQN Agents
-                for dqnAgent in dqnAgents:
-                    if len(dqnAgent.allRewards) > 0 and len(dqnAgent.actionRewards) == 0 and len(dqnAgent.pulseRewards) == 0:
+            if not self.cfg.EVAL_MODE: # every 204.8 usec
+                for agent in cognitiveAgents:
+                    agent.storeAndUpdate()
 
-                         # Calculate next observation centers from the next state
-                        nextObservationCenters = dqnAgent.getObservationCenters(dqnAgent.iterationsPerPulse)
+        realData = None
 
-                        dqnAgent.buffer.push(
-                            dqnAgent.state_t,
-                            dqnAgent.observationCenters_t,
-                            dqnAgent.action_idx,
-                            dqnAgent.allRewards[-1],
-                            np.stack(dqnAgent.lastPulseStates).astype(np.float32),
-                            nextObservationCenters,
-                            False
-                        )
-                        dqnAgent.train_step()
-                # Update M-FOS Agents  
-                for mfosAgent in mfosAgents:
-                    if len(mfosAgent.allRewards) > 0 and len(mfosAgent.actionRewards) == 0 and len(mfosAgent.pulseRewards) == 0:
-                        mfosAgent.record_reward(reward=mfosAgent.allRewards[-1])
-                        mfosAgent.update()
-
-                # Update DPG Agents:
-                for dpgAgent in dpgAgents:
-                    if len(dpgAgent.allRewards) > 0 and len(dpgAgent.actionRewards) == 0 and len(dpgAgent.pulseRewards) == 0:
-                        dpgAgent.buffer.push(
-                            dpgAgent.state_t,
-                            dpgAgent.lastAction,
-                            dpgAgent.allRewards[-1],
-                            currentState.astype(np.float32),
-                            False
-                        )
-
-                        dpgAgent.train_step()
-                
-                # Update Ablated M-FOS Agents  
-                for ablatedMfosAgent in ablatedMFOSAgents:
-                    if len(ablatedMfosAgent.allRewards) > 0 and len(ablatedMfosAgent.actionRewards) == 0 and len(ablatedMfosAgent.pulseRewards) == 0:
-                        ablatedMfosAgent.record_reward(reward=ablatedMfosAgent.allRewards[-1])
-                        ablatedMfosAgent.update()
-
-            if not self.cfg.EVAL_MODE:
-                if i % (iterationsInPulse * 1000) == 0:
-                    for dqnAgent in dqnAgents:
-                        dqnAgent.target.load_state_dict(dqnAgent.policy.state_dict())
-                
-                if i % (self.cfg.CPI_LEN * iterationsInPulse * 8) == 0 and i > 0:
-                    for idx, mfosAgent in enumerate(mfosAgents):
-
-                        mfosAgent.finish_individual()
-
-                        # 2️⃣ If generation complete → evolve
-                        if mfosAgent.is_generation_complete():
-                            best = np.argmax(mfosAgent.fitness)
-                            print("Best genome:", mfosAgent.population[best].genome)
-                            print(f"Evolving MFOS Agent {idx+1} population...")
-                            mfosAgent.evolve()
-
-        liveData = None
-
-        for agent in allCogAgents:
+        for agent in cognitiveAgents:
             self.generate_range_doppler_map(
                 agent=agent,
                 target_range_m=1040,
@@ -979,32 +946,26 @@ class Environment:
             )
 
         if self.cfg.AUTO_SAVE_LATEST:
-            save_agents(allCogAgents, self.cfg.CHECKPOINT_DIR)
+            save_agents(cognitiveAgents, self.cfg.CHECKPOINT_DIR)
 
         # Print Cumulative Rewards
         cumulativeRewardString = "Cumulative Evaluation Reward:"
-        for randomStartAgent in range(numRandomStartAgents):
-            print("Random Start Agent", randomStartAgent+1 if randomStartAgent > 0 else "", cumulativeRewardString, sum(randomStartAgents[randomStartAgent].allRewards[int(len(randomStartAgents[randomStartAgent].allRewards)*self.cfg.EVAL_SPLIT):]))
-        for saaAgent in range(numSaaAgents):
-            print("SAA Agent", saaAgent+1 if saaAgent > 0 else "", cumulativeRewardString, sum(saaAgents[saaAgent].allRewards[int(len(saaAgents[saaAgent].allRewards)*self.cfg.EVAL_SPLIT):]))
-        for ppoAgent in range(numPpoAgents):
-            print("PPO Agent", ppoAgent+1 if ppoAgent > 0 else "", cumulativeRewardString, sum(ppoAgents[ppoAgent].allRewards[int(len(ppoAgents[ppoAgent].allRewards)*self.cfg.EVAL_SPLIT):]))
-        for dqnAgent in range(numDqnAgents):
-            print("DQN Agent", dqnAgent+1 if dqnAgent > 0 else "", cumulativeRewardString, sum(dqnAgents[dqnAgent].allRewards[int(len(dqnAgents[dqnAgent].allRewards)*self.cfg.EVAL_SPLIT):]))
-        for mfosAgent in range(numMfosAgents):
-            print("M-FOS Agent", mfosAgent+1 if mfosAgent > 0 else "", cumulativeRewardString, sum(mfosAgents[mfosAgent].allRewards[int(len(mfosAgents[mfosAgent].allRewards)*self.cfg.EVAL_SPLIT):]))
-        for dpgAgent in range(numDpgAgents):
-            print("DPG Agent", dpgAgent+1 if dpgAgent > 0 else "", cumulativeRewardString, sum(dpgAgents[dpgAgent].allRewards[int(len(dpgAgents[dpgAgent].allRewards)*self.cfg.EVAL_SPLIT):]))
-        for ablatedMFOSAgent in range(numAblatedMfosAgents):
-            print("Ablated M-FOS Agent", ablatedMFOSAgent+1 if ablatedMFOSAgent > 0 else "", cumulativeRewardString, sum(ablatedMFOSAgents[ablatedMFOSAgent].allRewards[int(len(ablatedMFOSAgents[ablatedMFOSAgent].allRewards)*self.cfg.EVAL_SPLIT):]))
-                
+        for agent, class_name, class_index in self.enumerate_agents_by_class(cognitiveAgents):
+
+            eval_start = int(len(agent.allRewards) * self.cfg.EVAL_SPLIT)
+            rewards = agent.allRewards[eval_start:]
+
+            print(
+                f"{class_name} {class_index}"
+                f"{cumulativeRewardString} {sum(rewards)}"
+            )
 
         # Spectrum Usage and collisions per agent over time 
         states_list, alphas_list = zip(*allStates)
         stateMatrix = np.stack(states_list)
         alphaMatrix = np.stack(alphas_list)
 
-        colorCount = numRandomStartAgents + numSaaAgents + numPpoAgents + numDqnAgents + numMfosAgents + numDpgAgents + numAblatedMfosAgents + 3
+        colorCount = len(cognitiveAgents) + 3 # Free + Static + Collision
 
         cmap = self.build_agent_colormap(colorCount)
 
@@ -1026,7 +987,7 @@ class Environment:
         if self.cfg.SIM_MODE:
             plt.xlabel("Frequency Bin (Simulated 2.4-2.5 GHz)")
         else:
-            plt.xlabel("Frequency Bin (" + ("2.4-2.5" if liveDataFilename == './Data/spectrum_245ghz.dat' or liveDataFilename == './Data/union_spectrum_245ghz.dat' else "2.59-2.69") + "GHz)")
+            plt.xlabel("Frequency Bin (" + ("2.4-2.5" if realDataFilename == './Data/spectrum_245ghz.dat' or realDataFilename == './Data/union_spectrum_245ghz.dat' else "2.59-2.69") + "GHz)")
         plt.ylabel(f"Time Step (1 time step = {timestep} usec)")
         sample = self.cfg.SPECTRUM_SAMPLE_SIZE
 
@@ -1057,20 +1018,8 @@ class Environment:
         tickLabels.append("Free")
         # One color for all static agents
         tickLabels.append("Static Agents")
-        for randomStartAgent in range(numRandomStartAgents):
-            tickLabels.append("Random Start Agent " + (str(randomStartAgent + 1) if randomStartAgent > 0 else ""))  
-        for saaAgent in range(numSaaAgents):
-            tickLabels.append("SAA " + (str(saaAgent + 1) if saaAgent > 0 else ""))
-        for ppoAgent in range(numPpoAgents):
-            tickLabels.append("PPO " + (str(ppoAgent + 1) if ppoAgent > 0 else ""))
-        for dqnAgent in range(numDqnAgents):
-            tickLabels.append("DQN " + (str(dqnAgent + 1) if dqnAgent > 0 else ""))
-        for mfosAgent in range(numMfosAgents):
-            tickLabels.append("M-FOS " + (str(mfosAgent + 1) if mfosAgent > 0 else ""))
-        for dpgAgent in range(numDpgAgents):
-            tickLabels.append("DPG " + (str(dpgAgent + 1) if dpgAgent > 0 else ""))
-        for ablatedMfosAgent in range(numAblatedMfosAgents):
-            tickLabels.append("Ablated M-FOS  " + (str(ablatedMfosAgent + 1) if ablatedMfosAgent > 0 else ""))
+        for agent, class_name, class_index in self.enumerate_agents_by_class(cognitiveAgents):
+            tickLabels.append(f"{class_name} {class_index}")
         tickLabels.append("Collision")
 
         cbar.ax.set_yticklabels(tickLabels)
@@ -1084,14 +1033,8 @@ class Environment:
         observationAlphaMatrix = np.stack(obs_alphas_list)
 
         colorCount = (
-            numRandomStartAgents
-            + numSaaAgents
-            + numPpoAgents
-            + numDqnAgents
-            + numMfosAgents
-            + numDpgAgents
-            + numAblatedMfosAgents
-            + 2          # Free + Static
+            len(cognitiveAgents)
+            + 2 # Free + Static
         )
 
         cmap = self.build_agent_colormap(colorCount)
@@ -1118,7 +1061,7 @@ class Environment:
         else:
             plt.xlabel(
                 "Frequency Bin (" + ("2.4-2.5"
-                    if liveDataFilename in (
+                    if realDataFilename in (
                         "./Data/spectrum_245ghz.dat",
                         "./Data/union_spectrum_245ghz.dat"
                     )
@@ -1142,20 +1085,8 @@ class Environment:
         cbar.set_ticks(range(colorCount))
 
         tickLabels = ["Empty", "Static Agents"]
-        for randomStartAgent in range(numRandomStartAgents):
-            tickLabels.append("Random Start Agent" + (f" {randomStartAgent+1}" if randomStartAgent > 0 else ""))
-        for saaAgent in range(numSaaAgents):
-            tickLabels.append("SAA" + (f" {saaAgent+1}" if saaAgent > 0 else ""))
-        for ppoAgent in range(numPpoAgents):
-            tickLabels.append("PPO" + (f" {ppoAgent+1}" if ppoAgent > 0 else ""))
-        for dqnAgent in range(numDqnAgents):
-            tickLabels.append("DQN" + (f" {dqnAgent+1}" if dqnAgent > 0 else ""))
-        for mfosAgent in range(numMfosAgents):
-            tickLabels.append("M-FOS" + (f" {mfosAgent+1}" if mfosAgent > 0 else ""))
-        for dpgAgent in range(numDpgAgents):
-            tickLabels.append("DPG" + (f" {dpgAgent+1}" if dpgAgent > 0 else ""))
-        for ablatedAgent in range(numAblatedMfosAgents):
-            tickLabels.append("Ablated M-FOS" + (f" {ablatedAgent+1}" if ablatedAgent > 0 else ""))
+        for agent, class_name, class_index in self.enumerate_agents_by_class(cognitiveAgents):
+            tickLabels.append(f"{class_name} {class_index}")
 
         cbar.ax.set_yticklabels(tickLabels)
 
@@ -1169,28 +1100,22 @@ class Environment:
         plt.figure(figsize=(12, 8))
         block = int(self.cfg.CPI_LEN / self.cfg.PULSES_PER_ACTION)
 
-        for agent_type, agents, label_prefix in [
-            ("RandomStart", randomStartAgents, "Random Start Agent"),
-            ("SAA", saaAgents, "SAA Agent"),
-            ("PPO", ppoAgents, "PPO Agent"),
-            ("DQN", dqnAgents, "DQN Agent"),
-            ("MFOS", mfosAgents, "M-FOS Agent"),
-            ("DPG", dpgAgents, "DPG Agent"),
-            ("Ablated MFOS", ablatedMFOSAgents, "Ablated MFOS Agent")
-        ]:
-            for idx, agent in enumerate(agents):
-                allRewards = np.array(agent.allRewards)
-                x, mean, std = self.mean_std_every_n(allRewards, block)
-                plt.plot(x, mean, label=f"{label_prefix} {idx+1}")
-                plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-                # Collect last 20% stats
-                last_idx = int(len(allRewards) * self.cfg.EVAL_SPLIT)
-                reward_summary.append({
-                    "agent_type": agent_type,
-                    "agent_idx": idx,
-                    "avg_reward": float(np.mean(allRewards[last_idx:])),
-                    "std_reward": float(np.std(allRewards[last_idx:])),
-                })
+        for agent, agent_type, class_index in self.enumerate_agents_by_class(cognitiveAgents):
+            allRewards = np.array(agent.allRewards)
+            x, mean, std = self.mean_std_every_n(allRewards, block)
+            label = f"{agent_type} {class_index}"
+            plt.plot(x, mean, label=label)
+            plt.fill_between(x, mean - std, mean + std, alpha=0.25)
+
+            # Collect last 20% stats
+            last_idx = int(len(allRewards) * self.cfg.EVAL_SPLIT)
+            eval_rewards = allRewards[last_idx:]
+            reward_summary.append({
+                "agent_type": agent_type,
+                "agent_idx": class_index,
+                "avg_reward": float(np.mean(eval_rewards)),
+                "std_reward": float(np.std(eval_rewards)),
+            })
 
         plt.xlabel("Time Step (1=52,428.8 usec = 1 CPI)")
         plt.ylabel("Mean Reward")
@@ -1204,31 +1129,27 @@ class Environment:
         plt.figure(figsize=(12, 8))
         block = self.cfg.CPI_LEN
 
-        for agent_type, agents, label_prefix in [
-            ("RandomStart", randomStartAgents, "Random Start Agent"),
-            ("SAA", saaAgents, "SAA Agent"),
-            ("PPO", ppoAgents, "PPO Agent"),
-            ("DQN", dqnAgents, "DQN Agent"),
-            ("MFOS", mfosAgents, "M-FOS Agent"),
-            ("DPG", dpgAgents, "DPG Agent"),
-            ("Ablated MFOS", ablatedMFOSAgents, "Ablated MFOS Agent")
-        ]:
-            for idx, agent in enumerate(agents):
-                allActionsArr = np.array(agent.allActions)
-                x, mean, std = self.mean_std_every_n(allActionsArr[:, 1], block)
-                plt.plot(x, mean, label=f"{label_prefix} {idx+1}")
-                plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-                # Last 20% bandwidth
-                bandwidth = allActionsArr[:, 1]
-                start = int(len(bandwidth) * self.cfg.EVAL_SPLIT)
-                last_slice = bandwidth[start:]
 
-                bw_summary.append({
-                    "agent_type": agent_type,
-                    "agent_idx": idx,
-                    "avg_bw": float(np.mean(last_slice)),
-                    "std_bw": float(np.std(last_slice)),
-                })
+        for agent, agent_type, class_index in self.enumerate_agents_by_class(cognitiveAgents):
+            allActionsArr = np.array(agent.allActions)
+
+            x, mean, std = self.mean_std_every_n(allActionsArr[:, 1], block)
+            label = f"{agent_type} {class_index}"
+            plt.plot(x, mean, label=label)
+            plt.fill_between(x, mean - std, mean + std, alpha=0.25)
+
+            # Last 20% bandwidth
+            bandwidth = allActionsArr[:, 1]
+            start = int(len(bandwidth) * self.cfg.EVAL_SPLIT)
+            last_slice = bandwidth[start:]
+
+            bw_summary.append({
+                "agent_type": agent_type,
+                "agent_idx": class_index,
+                "avg_bw": float(np.mean(last_slice)),
+                "std_bw": float(np.std(last_slice)),
+            })
+            
             
         plt.xlabel("Time Step (1 = 52,428.8 usec)")
         plt.ylabel("Mean Bandwidth (MHz)")
@@ -1243,27 +1164,22 @@ class Environment:
         plt.figure(figsize=(12, 8))
         block = self.cfg.CPI_LEN
 
-        for agent_type, agents, label_prefix in [
-            ("RandomStart", randomStartAgents, "Random Start Agent"),
-            ("SAA", saaAgents, "SAA Agent"),
-            ("PPO", ppoAgents, "PPO Agent"),
-            ("DQN", dqnAgents, "DQN Agent"),
-            ("MFOS", mfosAgents, "M-FOS Agent"),
-            ("DPG", dpgAgents, "DPG Agent"),
-            ("Ablated MFOS", ablatedMFOSAgents, "Ablated MFOS Agent")
-        ]:
-            for idx, agent in enumerate(agents):
-                allCollisionsArr = np.array(agent.collisions)
-                x, mean, std = self.mean_std_every_n(allCollisionsArr, block)
-                plt.plot(x, mean, label=f"{label_prefix} {idx+1}")
-                plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-                last_idx = int(len(allCollisionsArr) * self.cfg.EVAL_SPLIT)
-                coll_summary.append({
-                    "agent_type": agent_type,
-                    "agent_idx": idx,
-                    "avg_coll": float(np.mean(allCollisionsArr[last_idx:])),
-                    "std_coll": float(np.std(allCollisionsArr[last_idx:])),
-                })
+        for agent, agent_type, class_index in self.enumerate_agents_by_class(cognitiveAgents):
+            allCollisionsArr = np.array(agent.collisions)
+
+            x, mean, std = self.mean_std_every_n(allCollisionsArr, block)
+            label = f"{agent_type} {class_index}"
+            plt.plot(x, mean, label=label)
+            plt.fill_between(x, mean - std, mean + std, alpha=0.25)
+
+            last_idx = int(len(allCollisionsArr) * self.cfg.EVAL_SPLIT)
+            collisionsSlice = allCollisionsArr[last_idx:]
+            coll_summary.append({
+                "agent_type": agent_type,
+                "agent_idx": class_index,
+                "avg_coll": float(np.mean(collisionsSlice)),
+                "std_coll": float(np.std(collisionsSlice)),
+            })
 
         plt.xlabel("Time Step (1 = 52,428.8 usec = 1 CPI)")
         plt.ylabel("Mean Collision Bandwidth (MHz)")
@@ -1277,27 +1193,23 @@ class Environment:
         plt.figure(figsize=(12, 8))
         block = self.cfg.CPI_LEN
 
-        for agent_type, agents, label_prefix in [
-            ("SAA", saaAgents, "SAA Agent"),
-            ("PPO", ppoAgents, "PPO Agent"),
-            ("DQN", dqnAgents, "DQN Agent"),
-            ("MFOS", mfosAgents, "M-FOS Agent"),
-            ("DPG", dpgAgents, "DPG Agent"),
-            ("Ablated MFOS", ablatedMFOSAgents, "Ablated MFOS Agent")
-        ]:
-            for idx, agent in enumerate(agents):
-                allActionsArr = np.array(agent.allActions)
-                diffs = np.abs(np.diff(allActionsArr[:, 1]))  # bandwidth diffs
-                x, mean, std = self.mean_std_every_n(diffs, block)
-                plt.plot(x, mean, label=f"{label_prefix} {idx+1}")
-                plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-                last_idx = int(len(mean) * self.cfg.EVAL_SPLIT)
-                delta_bw_summary.append({
-                    "agent_type": agent_type,
-                    "agent_idx": idx,
-                    "avg_delta_bw": float(np.mean(mean[last_idx:])),
-                    "std_delta_bw": float(np.mean(std[last_idx:])),
-                })
+        for agent, agent_type, class_index in self.enumerate_agents_by_class(cognitiveAgents):
+            allActionsArr = np.array(agent.allActions)
+            diffs = np.abs(np.diff(allActionsArr[:, 1]))  # bandwidth diffs
+
+            x, mean, std = self.mean_std_every_n(diffs, block)
+            label = f"{agent_type} {class_index}"
+            plt.plot(x, mean, label=label)
+            plt.fill_between(x, mean - std, mean + std, alpha=0.25)
+
+            last_idx = int(len(mean) * self.cfg.EVAL_SPLIT)
+            meanSlice = mean[last_idx:]
+            delta_bw_summary.append({
+                "agent_type": agent_type,
+                "agent_idx": class_index,
+                "avg_delta_bw": float(np.mean(meanSlice)),
+                "std_delta_bw": float(np.std(meanSlice)),
+            })
 
         plt.xlabel("Time Step (1 = 52,428.8 usec = 1 CPI)")
         plt.ylabel("Mean |Δ Bandwidth| (MHz)")
@@ -1310,28 +1222,25 @@ class Environment:
         # Delta Center Frequency Per Agent Plot
         plt.figure(figsize=(12, 8))
         block = self.cfg.CPI_LEN
+        for agent, agent_type, class_index in self.enumerate_agents_by_class(cognitiveAgents):
+            allActionsArr = np.array(agent.allActions)
 
-        for agent_type, agents, label_prefix in [
-            ("SAA", saaAgents, "SAA Agent"),
-            ("PPO", ppoAgents, "PPO Agent"),
-            ("DQN", dqnAgents, "DQN Agent"),
-            ("MFOS", mfosAgents, "M-FOS Agent"),
-            ("DPG", dpgAgents, "DPG Agent"),
-            ("Ablated MFOS", ablatedMFOSAgents, "Ablated MFOS Agent")
-        ]:
-            for idx, agent in enumerate(agents):
-                allActionsArr = np.array(agent.allActions)
-                diffs = np.abs(np.diff(allActionsArr[:, 0]))  # center freq diffs
-                x, mean, std = self.mean_std_every_n(diffs, block)
-                plt.plot(x, mean, label=f"{label_prefix} {idx+1}")
-                plt.fill_between(x, mean - std, mean + std, alpha=0.25)
-                last_idx = int(len(mean) * self.cfg.EVAL_SPLIT)
-                delta_cf_summary.append({
-                    "agent_type": agent_type,
-                    "agent_idx": idx,
-                    "avg_delta_cf": float(np.mean(mean[last_idx:])),
-                    "std_delta_cf": float(np.mean(std[last_idx:])),
-                })
+            x, mean, std = self.mean_std_every_n(allActionsArr[:, 0], block) # center freq diffs
+            label = f"{agent_type} {class_index}"
+            plt.plot(x, mean, label=label)
+            plt.fill_between(x, mean - std, mean + std, alpha=0.25)
+
+            # Last 20% bandwidth
+            centerFreq = allActionsArr[:, 0]
+            start = int(len(centerFreq) * self.cfg.EVAL_SPLIT)
+            last_slice = centerFreq[start:]
+
+            delta_cf_summary.append({
+                "agent_type": agent_type,
+                "agent_idx": class_index,
+                "avg_delta_cf": float(np.mean(last_slice)),
+                "std_delta_cf": float(np.std(last_slice)),
+            })
 
         plt.xlabel("Time Step (1 = 52,428.8 usec = 1 CPI)")
         plt.ylabel("Mean |Δ Center Frequency| (MHz)")
@@ -1344,37 +1253,22 @@ class Environment:
 
         rows = []
 
-        agent_types = [
-            ("RandomStart", randomStartAgents, reward_summary, coll_summary),
-            ("SAA", saaAgents, reward_summary, coll_summary, bw_summary, delta_bw_summary, delta_cf_summary),
-            ("PPO", ppoAgents, reward_summary, coll_summary, bw_summary, delta_bw_summary, delta_cf_summary),
-            ("DQN", dqnAgents, reward_summary, coll_summary, bw_summary, delta_bw_summary, delta_cf_summary),
-            ("MFOS", mfosAgents, reward_summary, coll_summary, bw_summary, delta_bw_summary, delta_cf_summary),
-            ("DPG", dpgAgents, reward_summary, coll_summary, bw_summary, delta_bw_summary, delta_cf_summary),
-            ("Ablated MFOS", ablatedMFOSAgents, "Ablated MFOS Agent")
-        ]
+        for agent, class_name, class_index in self.enumerate_agents_by_class(cognitiveAgents):
+            row = {
+                "Agent": f"{class_name}_{class_index}",
+                "AvgReward": self.get_stat(reward_summary, class_name, class_index, "avg_reward"),
+                "StdReward": self.get_stat(reward_summary, class_name, class_index, "std_reward"),
+                "AvgCollision": self.get_stat(coll_summary, class_name, class_index, "avg_coll"),
+                "StdCollision": self.get_stat(coll_summary, class_name, class_index, "std_coll"),
+                "AvgBW": self.get_stat(bw_summary, class_name, class_index, "avg_bw"),
+                "StdBW": self.get_stat(bw_summary, class_name, class_index, "std_bw"),
+                "AvgDeltaBW": self.get_stat(delta_bw_summary, class_name, class_index, "avg_delta_bw"),
+                "StdDeltaBW": self.get_stat(delta_bw_summary, class_name, class_index, "std_delta_bw"),
+                "AvgDeltaCF": self.get_stat(delta_cf_summary, class_name, class_index, "avg_delta_cf"),
+                "StdDeltaCF": self.get_stat(delta_cf_summary, class_name, class_index, "std_delta_cf")
+            }
 
-
-        # Build rows
-        for agent_type, agents, *stat_lists in agent_types:
-            for idx, agent in enumerate(agents):
-                row = {
-                    "Agent": f"{agent_type}_{idx+1}",
-                    "AvgReward": self.get_stat(reward_summary, agent_type, idx, "avg_reward"),
-                    "StdReward": self.get_stat(reward_summary, agent_type, idx, "std_reward"),
-                    "AvgCollision": self.get_stat(coll_summary, agent_type, idx, "avg_coll"),
-                    "StdCollision": self.get_stat(coll_summary, agent_type, idx, "std_coll"),
-                    "AvgBW": self.get_stat(bw_summary, agent_type, idx, "avg_bw"),
-                    "StdBW": self.get_stat(bw_summary, agent_type, idx, "std_bw"),
-                }
-                if agent_type != "RandomStart":  # these have ΔBW / ΔCF stats
-                    row.update({
-                        "AvgDeltaBW": self.get_stat(delta_bw_summary, agent_type, idx, "avg_delta_bw"),
-                        "StdDeltaBW": self.get_stat(delta_bw_summary, agent_type, idx, "std_delta_bw"),
-                        "AvgDeltaCF": self.get_stat(delta_cf_summary, agent_type, idx, "avg_delta_cf"),
-                        "StdDeltaCF": self.get_stat(delta_cf_summary, agent_type, idx, "std_delta_cf"),
-                    })
-                rows.append(row)
+            rows.append(row)
 
         # Save to Excel
         df = pd.DataFrame(rows)
@@ -1419,37 +1313,37 @@ class Environment:
         self.cfg.SEED += 1
         torch.Generator(device=self.cfg.DEVICE).manual_seed(self.cfg.SEED)
 
-        liveDataFilename = self.cfg.SPECTRUM_FILES[self.cfg.DATA_CHOICE]
-        storedStateFile = self.cfg.STORED_STATE_MAP[liveDataFilename]
+        realDataFilename = self.cfg.SPECTRUM_FILES[self.cfg.DATA_CHOICE]
+        storedStateFile = self.cfg.STORED_STATE_MAP[realDataFilename]
         startingFrequency = self.cfg.STARTING_FREQUENCY_MAP[storedStateFile]
 
-        if not self.cfg.SIM_MODE and not os.path.exists(storedStateFile) and not os.path.exists(liveDataFilename):
-            print(f"Warning: files not found -> {storedStateFile} -> {liveDataFilename}")
+        if not self.cfg.SIM_MODE and not os.path.exists(storedStateFile) and not os.path.exists(realDataFilename):
+            print(f"Warning: files not found -> {storedStateFile} -> {realDataFilename}")
             self.cfg.SIM_MODE = True
 
         # If precomputed file exists, just load it
         if not self.cfg.SIM_MODE:
             if os.path.exists(storedStateFile):
                 npz = np.load(storedStateFile)
-                liveData = npz["states"]  # shape (num_samples, fftSize), dtype=bool
-                print("Loaded precomputed states:", liveData.shape)
+                realData = npz["states"]  # shape (num_samples, fftSize), dtype=bool
+                print("Loaded precomputed states:", realData.shape)
             else:
-                liveData = []
+                realData = []
                 sp = SignalProcessor(self.cfg)
-                with open(liveDataFilename, "rb") as f:
+                with open(realDataFilename, "rb") as f:
                     while True:
                         state = sp.compute_state_from_file(f)
                         if state is None:
                             break
-                        liveData.append(state)
+                        realData.append(state)
                 
-                liveData = np.stack(liveData)  # (num_samples, fftSize)
+                realData = np.stack(realData)  # (num_samples, fftSize)
                 
                 # Save for future reuse
-                np.savez_compressed(storedStateFile, states=liveData)
-                print("Saved precomputed states:", liveData.shape)
+                np.savez_compressed(storedStateFile, states=realData)
+                print("Saved precomputed states:", realData.shape)
 
-        iterations = self.cfg.ITERATIONS if self.cfg.SIM_MODE else liveData.shape[0]
+        iterations = self.cfg.ITERATIONS if self.cfg.SIM_MODE else realData.shape[0]
         timestep = pulseWidth = 10.24
         iterationsInPulse = int(self.cfg.PRI / timestep)
 
@@ -1688,8 +1582,8 @@ class Environment:
                 staticAgent.iterateCurrentAction()
                 currentState = self.updateStateInterval(currentState, staticAgent.currentAction)
 
-            if self.cfg.SIM_MODE == False: # Use Live Data
-                currentState = currentState | liveData[i%len(liveData)]
+            if self.cfg.SIM_MODE == False: # Use real Data
+                currentState = currentState | realData[i%len(realData)]
                 
             staticState = currentState.copy()
             
@@ -1756,7 +1650,7 @@ class Environment:
                     dqnAgent.target.load_state_dict(dqnAgent.policy.state_dict())
                 
 
-        liveData = None
+        realData = None
 
         scores = []
 

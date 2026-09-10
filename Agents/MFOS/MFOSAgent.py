@@ -17,6 +17,7 @@ class RNN(nn.Module):
         hidden_dim=128,
         action_dim=2,
         observ_dim=3,
+        rollout_len=32,
         device="cpu",
         seed=None
     ):
@@ -30,6 +31,7 @@ class RNN(nn.Module):
         self.observ_dim = observ_dim
         self.genome = genome
         self.seed = seed
+        self.rollout_len = rollout_len
         self.torch_rng = torch.Generator(device=device)
         if self.seed is not None:
             self.torch_rng.manual_seed(self.seed)
@@ -119,7 +121,7 @@ class RNN(nn.Module):
 
         torch.random.set_rng_state(state)
 
-    def forward(self, pulse_seq_batch, observation_centers, prevAction, cpiIndices, hidden=None):
+    def forward(self, pulse_seq_batch, observation_centers, prevAction, isCpiStarts, hidden=None):
         # (B,T,observation_bin_size)
         x = torch.relu(self.embedding(pulse_seq_batch))
 
@@ -134,7 +136,7 @@ class RNN(nn.Module):
             [
                 pooled,
                 prevAction,
-                cpiIndices
+                isCpiStarts
             ],
             dim=-1
         )
@@ -201,7 +203,7 @@ class RNN(nn.Module):
 
         obs_sigma = torch.full_like(obs_mu, obs_std)
 
-        if eval:
+        if False:  # eval:
             sampled_obs = obs_mu
         else:
             obs_dist = NormalWithRNG(obs_mu, obs_sigma)
@@ -265,7 +267,7 @@ class RNN(nn.Module):
 
     # Inner lifetime update (REINFORCE)
     def update(self):
-        if len(self.rewards) != 32:
+        if len(self.rewards) < self.rollout_len:
             return
         
         self.last_update_stats = {}
@@ -470,6 +472,7 @@ class MFOSAgent(CognitiveAgent):
         self.fresh_fraction = fresh_fraction
 
         self.np_rng = np.random.default_rng(seed)
+        rollout_len = max(int(32/self.pulsesPerAction), 1)
 
         self.population = []
         if base_genome is None:
@@ -484,13 +487,20 @@ class MFOSAgent(CognitiveAgent):
                 observationSize=observationSize,
                 action_dim=2,
                 observ_dim=observationCenterCount,
+                rollout_len=rollout_len,
                 device=device,
                 seed=seed
             )
         else:
             base_individual = MFOSIndividual(base_genome)
-            self.policy = RNN(base_genome, fftSize=fftSize, observationSize=observationSize, 
-                              action_dim=2, observ_dim=observationCenterCount, device=device, seed=seed)
+            self.policy = RNN(base_genome, 
+                              fftSize=fftSize, 
+                              observationSize=observationSize, 
+                              action_dim=2, 
+                              observ_dim=observationCenterCount, 
+                              rollout_len=rollout_len,
+                              device=device, 
+                              seed=seed)
             
             self.population.append(base_individual)
 
@@ -578,7 +588,22 @@ class MFOSAgent(CognitiveAgent):
         self.policy.reset()
         individual.reward_history = []
 
-    def set_eval_mode(self):
+    def storeAndUpdate(self):
+        if len(self.allRewards) > 0 and len(self.actionRewards) == 0 and len(self.pulseRewards) == 0:
+            self.record_reward(reward=self.allRewards[-1])
+            self.update()
+
+            actionCount = len(self.allActions)
+            if actionCount > 0 and actionCount % (self.cpiLen * 8) == 0:
+                self.finish_individual()
+
+                if self.is_generation_complete():
+                    best = np.argmax(self.fitness)
+                    print("Best genome:", self.population[best].genome)
+                    print(f"Evolving MFOS Agent population...")
+                    self.evolve()
+
+    def setEvalMode(self):
         # Start with best-ever
         best_candidate = self.best_individual_ever
         best_score = self.best_ave_reward_ever
@@ -824,14 +849,31 @@ class AblatedMFOSAgent(CognitiveAgent):
         self.eval_mode = False
         self.observationSize = observationSize
         self.np_rng = np.random.default_rng(seed)
+        rollout_len = max(int(32/self.pulsesPerAction), 1)
         if genome is None:
-            self.policy = RNN(random_genome(self.np_rng), fftSize=fftSize, observationSize=observationSize, 
-                              action_dim=2, observ_dim=observationCenterCount, device=device, seed=seed)
+            self.policy = RNN(random_genome(self.np_rng), 
+                              fftSize=fftSize, 
+                              observationSize=observationSize, 
+                              action_dim=2, 
+                              observ_dim=observationCenterCount,
+                              rollout_len=rollout_len, 
+                              device=device, 
+                              seed=seed)
         else:
-            self.policy = RNN(genome, fftSize=fftSize, observationSize=observationSize, action_dim=2, 
-                              observ_dim=observationCenterCount, device=device, seed=seed)
+            self.policy = RNN(genome, fftSize=fftSize, 
+                              observationSize=observationSize, 
+                              action_dim=2, 
+                              observ_dim=observationCenterCount,
+                              rollout_len=rollout_len, 
+                              device=device, 
+                              seed=seed)
 
-    def set_eval_mode(self):
+    def storeAndUpdate(self):
+        if len(self.allRewards) > 0 and len(self.actionRewards) == 0 and len(self.pulseRewards) == 0:
+            self.record_reward(reward=self.allRewards[-1])
+            self.update()
+            
+    def setEvalMode(self):
         self.eval_mode = True
     
     def selectAction(self, eval_mode, obs_only=False):

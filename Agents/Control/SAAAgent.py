@@ -25,6 +25,12 @@ class SAAAgent(CognitiveAgent):
 
         self.currentAction = int(starts[idx]), int(ends[idx])
     
+    def storeAndUpdate(self):
+        pass
+
+    def setEvalMode(self):
+        pass
+    
     def save(self, path):
         pass
 

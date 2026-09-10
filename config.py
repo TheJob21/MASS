@@ -1,24 +1,22 @@
-import torch
-
 # GENERAL EXECUTION SETTINGS
 SIM_MODE = True          # True = synthetic, False = live spectrum
 MULTI_AGENT = True
 EVAL_MODE = False
-RANDOM_START_INDICES = True
+RANDOM_START_INDICES = False
 
 DEVICE = "cpu" # "cuda" if torch.cuda.is_available() else "cpu"
-SEED = 42869
+SEED = 42569
 
 CHECKPOINT_DIR = "Agents/Checkpoints"
 LOAD_CHECKPOINTS = False
 
-AUTO_SAVE_LATEST = False
+AUTO_SAVE_LATEST = True
 
 
-OUTPUT_FILE = "./Output/agent_eval_summary_multiUnion245.xlsx"
+OUTPUT_FILE = "./Output/agent_eval_summary_soloAarc245.xlsx"
 
-# DATA_CHOICE = "245"
-DATA_CHOICE = "u245"
+DATA_CHOICE = "245"
+# DATA_CHOICE = "u245"
 # DATA_CHOICE = "264"
 # DATA_CHOICE = "u264"
 
@@ -63,13 +61,14 @@ AGENTS = {
         "pulsed": 0,
         "rectangular": 0
     },
-    "random_start": 2,
+    "random_start": 0,
     "saa": 0,
     "ppo": 1,
     "dqn": 1,
-    "mfos": 1,
+    "mfos": 0,
     "dpg": 0,
-    "ablated_mfos": 1
+    "ablated_mfos": 0,
+    "adversary": 1
 }
 
 # PPO
@@ -114,12 +113,12 @@ MFOS = {
 # collisionTransmissionTolRatio = 0.033
 
 REWARD = {
-    "collision_ratio": 0.033,#0.033,
+    "collision_ratio": 0.02,#0.033,
     "beta": 0.75,
     "transmission_weight": 1.0,
     "collision_weight": None,  # computed dynamically if needed
-    "bandwidth_distortion": 0.3,
-    "center_distortion": 0.3,
+    "bandwidth_distortion": 0.2,
+    "center_distortion": 0.2,
     "deadspace_penalty_scale": 15.0
 }
 
@@ -136,10 +135,10 @@ OBSERVATION_CENTER_COUNT = 1
 
 # RUNTIME CONTROL
 ITERATIONS = 2_500_000
-SPECTRUM_SAMPLE_SIZE = 15_000
-PULSES_PER_ACTION = 8 # Every X pulses, choose new action
+SPECTRUM_SAMPLE_SIZE = 100_000
+PULSES_PER_ACTION = 1 # Every X pulses, choose new action
 
-EVAL_SPLIT = 0.9
+EVAL_SPLIT = 0.8
 PRINT_INTERVAL = 100_000
 
 TIMESTEP_US = 10.24

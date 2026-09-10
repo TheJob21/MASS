@@ -32,6 +32,14 @@ class CognitiveAgent(Agent, ABC):
     def selectAction(self, eval_mode, obs_only):
         pass
 
+    @abstractmethod
+    def storeAndUpdate(self):
+        pass
+
+    @abstractmethod
+    def setEvalMode(self):
+        pass
+
     def storeReward(self, reward):
         self.pulseRewards.append(reward)
         if len(self.pulseRewards) == self.iterationsPerPulse:
@@ -49,10 +57,10 @@ class CognitiveAgent(Agent, ABC):
             self.anchorAction = self.curActionAsCenterFreqBW()
 
             self.sumCenterFreqForCPI = 0
-            self.sumBwForCPI = 0    
+            self.sumBwForCPI = 0   
 
         self.isTransmitting = True
-        
+
         self.sumCenterFreqForCPI += newAction[0]
         self.sumBwForCPI += newAction[1]
 
@@ -92,7 +100,7 @@ class CognitiveAgent(Agent, ABC):
         return self.__class__.__name__.lower()
     
     # Utility: Continuous → Interval
-    def continuous_action_to_interval(self, center, bandwidth, bandwidthMax=1024):
+    def continuous_action_to_interval(self, center, bandwidth, bandwidthMin=102, bandwidthMax=1024):
         """
         center ∈ [-1, 1]
         bandwidth ∈ [0, 1]  (but we do not enforce it)
@@ -102,8 +110,8 @@ class CognitiveAgent(Agent, ABC):
         """
 
         # --- Convert bandwidth to bins (no clipping) ---
-        bw_bins = int(round(bandwidth * bandwidthMax))
-        bw_bins = max(bw_bins, 102) # min 10 MHz
+        bw_bins = int(round(bandwidth * (bandwidthMax-bandwidthMin) + bandwidthMin))
+        # bw_bins = max(bw_bins, 102) # min 10 MHz
 
         # --- Compute interval ---
         half_bw = bw_bins // 2

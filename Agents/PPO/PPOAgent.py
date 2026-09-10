@@ -17,27 +17,37 @@ class RecurrentSpectrumPPO(nn.Module):
     ):
         super().__init__()
         self.action_dim = action_dim
-        attention_dim = spectrum_dim + 1
-        
+        self.snapshot_dim = spectrum_dim + 2
+        self.encoded_dim = 2 * self.snapshot_dim
+
+        # Make snapshot_dim divisible by num_heads
+        if self.snapshot_dim % num_heads != 0:
+            self.snapshot_dim = ((self.snapshot_dim + num_heads - 1) // num_heads) * num_heads
+            self.encoded_dim = 2 * self.snapshot_dim
+
         # Intra-pulse encoder
-        self.embedding = nn.Linear(observationSize, spectrum_dim)
+        self.embedding = nn.Linear(observationSize, self.snapshot_dim-2)
 
         # ✅ Learnable positional encoding for 20 snapshots
-        self.pos_embedding = nn.Parameter(torch.zeros(1, num_snapshots, attention_dim))
+        self.pos_embedding = nn.Parameter(torch.zeros(1, num_snapshots, self.snapshot_dim))
         
         # Intra-decision temporal attention (over 20 snapshots)
         self.snapshot_attn = nn.MultiheadAttention(
-            embed_dim=attention_dim,
+            embed_dim=self.snapshot_dim,
             num_heads=num_heads,
             batch_first=True
         )
 
-        self.attn_norm = nn.LayerNorm(attention_dim)
-
+        self.attn_norm = nn.LayerNorm(self.snapshot_dim)
+        self.snapshot_score = nn.Sequential(
+            nn.Linear(self.snapshot_dim, 64),
+            nn.Tanh(),
+            nn.Linear(64, 1)
+        )
 
         # Temporal memory across decisions
         self.lstm = nn.LSTM(
-            input_size=spectrum_dim + self.action_dim + 2, # Action and CPI Index added here
+            input_size=self.encoded_dim + self.action_dim + 1, # Action and CPI Index added here
             hidden_size=lstm_hidden,
             batch_first=True
         )
@@ -89,8 +99,6 @@ class RecurrentSpectrumPPO(nn.Module):
         nn.init.orthogonal_(self.obs_mu.weight, gain=0.01)
         nn.init.zeros_(self.obs_mu.bias)
         bias = torch.zeros(2)
-        bias[0] = -1.0
-        bias[1] = 1.0
         self.tx_mu.bias.data = bias
 
         bias = torch.zeros(self.action_dim-2)
@@ -110,29 +118,46 @@ class RecurrentSpectrumPPO(nn.Module):
 
         # Embed each snapshot
         x = F.relu(self.embedding(pulse_seq))  # (B*T, 20, spectrum_dim)
+        time_pos = torch.linspace(
+            0.0, 1.0, x.size(1),
+            device=x.device,
+            dtype=x.dtype
+        ).view(1, x.size(1), 1).expand(x.size(0), -1, -1)
 
-        x = torch.cat([x, observationCenters], dim=-1)
-
-        S = x.size(1)
+        x = torch.cat([x, observationCenters, time_pos], dim=-1)
         
         # ✅ Add positional encoding (trim if needed)
-        x = x + self.pos_embedding[:, :S, :]
+        x = x + self.pos_embedding[:, :x.size(1), :]
         
         # Causal mask so snapshot t cannot see future snapshot
-        mask = torch.triu(
-            torch.ones(S, S, device=x.device, dtype=torch.bool),
-            diagonal=1
-        )
+        # mask = torch.triu(
+        #     torch.ones(S, S, device=x.device, dtype=torch.bool),
+        #     diagonal=1
+        # )
 
-        attn_out, _ = self.snapshot_attn(x, x, x, attn_mask = mask)
+        attn_out, _ = self.snapshot_attn(x, x, x)#, attn_mask = mask)
 
         x = self.attn_norm(x + attn_out)
 
+        # Attention pooling over all snapshots
+        scores = self.snapshot_score(x).squeeze(-1)      # (B, S)
+        weights = torch.softmax(scores, dim=1)           # (B, S)
+
+        attended = torch.sum(x * weights.unsqueeze(-1), dim=1)  # (B, snapshot_dim)
+
+        # Sparse-event path: preserve strongest snapshot
+        sparse = x.max(dim=1).values
+
+        # Concatenate both summaries
+        encoded = torch.cat([attended, sparse], dim=-1)
+
+        return encoded
+
         # Compress 20 snapshots → single vector
         # x = x.mean(dim=1)
-        x = x[:, -1, :]
+        # x = x[:, -1, :]
         
-        return x
+        # return x
 
     def forward(self, pulse_seq_batch, prevAction, observationCenters, cpiIndices, hidden=None):
         """
@@ -368,7 +393,7 @@ class PPOAgent(CognitiveAgent):
             tx_std = tx_log_std.exp()
             obs_std = obs_log_std.exp()
 
-            if eval_mode:
+            if False:#eval_mode:
                 obs_raw_action = obs_mu
                 if not obs_only:
                     tx_raw_action = tx_mu
@@ -492,12 +517,12 @@ class PPOAgent(CognitiveAgent):
                 self.values.append(
                     value.detach()
                 )
-                if not obs_only:
-                    print(
-                        f"mu={tx_mu.cpu().numpy()}, "
-                        f"std={tx_std.cpu().numpy()}, "
-                        f"action={tx_action.cpu().numpy()}"
-                    )
+                # if not obs_only:
+                #     print(
+                #         f"mu={tx_mu.cpu().numpy()}, "
+                #         f"std={tx_std.cpu().numpy()}, "
+                #         f"action={tx_action.cpu().numpy()}"
+                #     )
 
     def store_reward(self, reward, done=False):
         self.rewards.append(float(reward))
@@ -616,6 +641,12 @@ class PPOAgent(CognitiveAgent):
 
         usable = num_seq * seq_len
 
+        initial_hidden = self._chunk_initial_hidden(
+            usable=usable,
+            seq_len=seq_len,
+            device=device
+        )
+
         states = states[:usable]
         actions = actions[:usable]
 
@@ -701,13 +732,16 @@ class PPOAgent(CognitiveAgent):
                 tx_mask = txDecisionFlags[idx]
 
                 # Start each BPTT sequence with no hidden state
-                hidden = None
+                hidden_batch = (
+                    initial_hidden[0][:, idx, :].contiguous(),
+                    initial_hidden[1][:, idx, :].contiguous()
+                )
                 (tx_mu, tx_log_std, obs_mu, obs_log_std, value_pred, _) = self.policy(
                     state_batch,
                     prev_batch,
                     observationCenters_batch,
                     cpiIndices_batch,
-                    hidden
+                    hidden_batch
                 )
 
                 # Distribution parameters
@@ -906,6 +940,52 @@ class PPOAgent(CognitiveAgent):
 
         self.txDecisionFlags.clear()
 
+    def _chunk_initial_hidden(self, usable, seq_len, device):
+        num_seq = usable // seq_len
+
+        hidden_size = self.policy.lstm.hidden_size
+        num_layers = self.policy.lstm.num_layers
+
+        h0 = []
+        c0 = []
+
+        for sequence_index in range(num_seq):
+            rollout_index = sequence_index * seq_len
+            stored_hidden = self.hiddens[rollout_index]
+
+            if stored_hidden is None:
+                h = torch.zeros(
+                    num_layers, 1, hidden_size,
+                    device=device
+                )
+                c = torch.zeros(
+                    num_layers, 1, hidden_size,
+                    device=device
+                )
+            else:
+                h, c = stored_hidden
+                h = h.detach().to(device)
+                c = c.detach().to(device)
+
+            h0.append(h)
+            c0.append(c)
+
+        return (
+            torch.cat(h0, dim=1),
+            torch.cat(c0, dim=1)
+        )
+    
+    def storeAndUpdate(self):
+        if len(self.allRewards) > 0 and len(self.actionRewards) == 0 and len(self.pulseRewards) == 0:
+            self.store_reward(
+                reward=self.allRewards[-1],
+                done=False
+            )
+            self.update()
+
+    def setEvalMode(self):
+        self.policy.eval()
+
     def save(self, path):
 
         checkpoint = {
@@ -994,17 +1074,13 @@ class PPOAgent(CognitiveAgent):
             self.bptt_chunk
         )
 
-        # ------------------------------------------------
         # Restore RNG state
-        # ------------------------------------------------
         if "torch_rng_state" in checkpoint:
             self.torchRng.set_state(
                 checkpoint["torch_rng_state"]
             )
 
-        # ------------------------------------------------
         # Optional sanity checks
-        # ------------------------------------------------
         saved_fft = checkpoint.get("fftSize", None)
         saved_cpi = checkpoint.get("cpiLen", None)
 
@@ -1019,10 +1095,5 @@ class PPOAgent(CognitiveAgent):
                 f"Warning: checkpoint cpiLen={saved_cpi} "
                 f"but current cpiLen={self.cpiLen}"
             )
-
-        # ------------------------------------------------
-        # Put model in eval mode by default
-        # ------------------------------------------------
-        self.policy.eval()
 
         print(f"Loaded PPO checkpoint from: {path}")

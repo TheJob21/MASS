@@ -170,6 +170,31 @@ class DQNAgent(CognitiveAgent):
             self.epsilon * self.epsilon_decay
         )
 
+    def storeAndUpdate(self):
+        if len(self.allRewards) > 0 and len(self.actionRewards) == 0 and len(self.pulseRewards) == 0:
+
+                # Calculate next observation centers from the next state
+            nextObservationCenters = self.getObservationCenters(self.iterationsPerPulse)
+
+            self.buffer.push(
+                self.state_t,
+                self.observationCenters_t,
+                self.action_idx,
+                self.allRewards[-1],
+                np.stack(self.lastPulseStates).astype(np.float32),
+                nextObservationCenters,
+                False
+            )
+            self.train_step()
+
+        actionCount = len(self.allActions)
+        if actionCount > 0 and actionCount % 1000 == 0:
+            self.target.load_state_dict(self.policy.state_dict())
+
+    def setEvalMode(self):
+        self.policy.eval()
+        self.epsilon = 0.0
+
     def save(self, path):
 
         checkpoint = {

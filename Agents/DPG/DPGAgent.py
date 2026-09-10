@@ -182,7 +182,22 @@ class DPGAgent(CognitiveAgent):
             target_param.data.copy_(
                 self.tau*param.data + (1-self.tau)*target_param.data
             )
+
+    def storeAndUpdate(self):
+        if len(self.allRewards) > 0 and len(self.actionRewards) == 0 and len(self.pulseRewards) == 0:
+            self.buffer.push(
+                self.state_t,
+                self.lastAction,
+                self.allRewards[-1],
+                self.lastPulseStates[-1].astype(np.float32), # This used to be currentState, which was the new state update with data and agent transmissions, this is probably wrong
+                False
+            )
+
+            self.train_step()
         
+    def setEvalMode(self):
+        pass
+    
     def save(self, path):
 
         checkpoint = {
