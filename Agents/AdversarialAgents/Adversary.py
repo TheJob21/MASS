@@ -72,10 +72,11 @@ class Adversary(Agent):
 
             if largestStart is None:
                 self.currentAction = self.actionToWobble = None
+                self.isTransmitting = False
                 return
 
             center = (largestStart + largestEnd) // 2
-            self.currentAction = self.actionToWobble = max(0, center-(self.bwBinCount/2)), min(self.fftSize, center+(self.bwBinCount/2))
+            self.currentAction = self.actionToWobble = max(0, center-(self.bwBinCount//2)), min(self.fftSize, center+(self.bwBinCount//2))
         else: # wobble current action
             if self.actionToWobble is None:
                 return

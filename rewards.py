@@ -84,13 +84,13 @@ class Rewards():
                         utilization = min(bwBinSize / max(idealBwSize, 1.0), 1.0)
                         rewardAdapt = (1.0 - utilization) * config.REWARD['deadspace_penalty_scale']
                     else:
-                        anchorCenterFreq = cogAgent.anchorAction[0]
-                        anchorBw = cogAgent.anchorAction[1]
-                        # avgCenterFreq = cogAgent.getAveCenterFreqForCPI()
-                        # avgBW = cogAgent.getAveBwForCPI()
+                        # anchorCenterFreq = cogAgent.anchorAction[0]
+                        # anchorBw = cogAgent.anchorAction[1]
+                        avgCenterFreq = cogAgent.getAveCenterFreqForCPI()
+                        avgBW = cogAgent.getAveBwForCPI()
                         agentCenterFreq, agentBW = cogAgent.curActionAsCenterFreqBW()
-                        deltaBW = abs(agentBW - anchorBw) / channelBandwidth
-                        deltaCenterFreq = abs(agentCenterFreq - anchorCenterFreq) / channelBandwidth
+                        deltaBW = abs(agentBW - avgBW) / channelBandwidth
+                        deltaCenterFreq = abs(agentCenterFreq - avgCenterFreq) / channelBandwidth
                         
                         rewardAdapt = (config.REWARD['bandwidth_distortion'] * deltaBW ** 2) + (config.REWARD['center_distortion'] * deltaCenterFreq ** 2)
                         
