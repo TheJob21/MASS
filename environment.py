@@ -116,7 +116,8 @@ class Environment:
         staticState,
         listOfAgents,
         iteration,
-        iterationsInPulse
+        iterationsInPulse,
+        adversarialState=None
     ):
         fftSize = self.cfg.FFT_SIZE
 
@@ -126,6 +127,11 @@ class Environment:
 
         state[staticState] = 1
         alpha_mask[staticState] = 1.0
+
+        if adversarialState is not None:
+            adversary_label = len(listOfAgents) + 2
+            state[adversarialState] = adversary_label
+            alpha_mask[adversarialState] = 1.0
 
         for idx, agent in enumerate(listOfAgents):
 
@@ -196,7 +202,8 @@ class Environment:
         self,
         staticState,
         listOfAgents,
-        binOwnership
+        binOwnership,
+        adversarialState=None
     ):
         fftSize = self.cfg.FFT_SIZE
         # State is just ownership
@@ -207,6 +214,11 @@ class Environment:
 
         # Static always visible
         alpha_mask[staticState] = 1.0
+
+        if adversarialState is not None:
+            adversary_label = len(listOfAgents) + 2
+            state[adversarialState] = adversary_label
+            alpha_mask[adversarialState] = 1.0
 
         # Collision mask
         collision_mask = np.zeros(fftSize, dtype=bool)
@@ -246,7 +258,7 @@ class Environment:
                 alpha_mask[s:e][listen_mask] = 0.3
 
         # Collision override
-        collision_label = len(listOfAgents) + 2
+        collision_label = len(listOfAgents) + 3
 
         state[collision_mask] = collision_label
         alpha_mask[collision_mask] = 1.0
@@ -741,31 +753,42 @@ class Environment:
         return cognitiveAgents
 
     def initializeStaticAgents(self):
-        staticAgentRNG = np.random.default_rng(self.cfg.SEED)
+        rng = np.random.default_rng(self.cfg.SEED)
         self.cfg.SEED += 1
 
         staticAgents = []
         for staticAgent in range(self.cfg.AGENTS['static']['fat']): # pw .1 - .25K, interval 10K, 150-175 bins wide
-            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Fat, agentTypeIndex=staticAgent))
+            staticAgents.append(StaticAgent(rng=rng, staticType=StaticType.Fat, agentTypeIndex=staticAgent))
         for staticAgent in range(self.cfg.AGENTS['static']['skinny']): # pw .25K, interval 2K, 20 bins wide
-            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Skinny, agentTypeIndex=staticAgent))
+            staticAgents.append(StaticAgent(rng=rng, staticType=StaticType.Skinny, agentTypeIndex=staticAgent))
         for staticAgent in range(self.cfg.AGENTS['static']['pulsed']): # pw .1K, interval = 4K, 30-40 bins wide on/off
-            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Pulsed, agentTypeIndex=staticAgent))
+            staticAgents.append(StaticAgent(rng=rng, staticType=StaticType.Pulsed, agentTypeIndex=staticAgent))
         for staticAgent in range(self.cfg.AGENTS['static']['rectangular']): # pw = 50, interval = 10 -250,  60-680 bins
-            staticAgents.append(StaticAgent(rng=staticAgentRNG, staticType=StaticType.Rectangular, agentTypeIndex=staticAgent))
+            staticAgents.append(StaticAgent(rng=rng, staticType=StaticType.Rectangular, agentTypeIndex=staticAgent))
 
         return staticAgents
 
     def initializeAdversarialAgents(self, iterationsInPulse, startingFrequency):
+        
+        rng = np.random.default_rng(self.cfg.SEED)
+        self.cfg.SEED += 1
+
         adversarialAgents = []
 
-        for _ in range(self.cfg.AGENTS['adversary']):
+        for i in range(self.cfg.AGENTS['adversary']):
             adversarialAgent = Adversary(currentAction=None, 
                                          fftSize=self.cfg.FFT_SIZE, 
                                          iterationsPerPulse=iterationsInPulse, 
                                          binSize=self.cfg.BIN_SIZE, 
                                          startingFrequency=startingFrequency,
-                                         pulsesPerAction=self.cfg.PULSES_PER_ACTION)
+                                         pulsesPerAction=self.cfg.PULSES_PER_ACTION,
+                                         focusTime=15360, # 15,360 is 3 CPI lengths for radar.
+                                         refocusTime=97657, # 97,657 is number of iterations in 1 second for 10.24usec iteration
+                                         rng=rng, 
+                                         bwBinCount=50,
+                                         startDelay=20 + i*16000
+                                         )
+            
             adversarialAgents.append(adversarialAgent)
 
         return adversarialAgents
@@ -881,9 +904,14 @@ class Environment:
             if self.cfg.SIM_MODE == False: # Use real Data
                 currentState = currentState | realData[i%len(realData)]
 
+            environmentalState = currentState.copy()
+
+            adversarialState = self.initState()
             for adversary in adversarialAgents:
                 if adversary.isTransmitting:
-                    currentState = self.updateStateInterval(currentState, adversary.currentAction)
+                    adversarialState = self.updateStateInterval(adversarialState, adversary.currentAction)
+
+            currentState = currentState | adversarialState
                         
             staticState = currentState.copy()
             
@@ -906,15 +934,17 @@ class Environment:
                 or i >= spectrumSampleEndStart
             ): 
                 allStates.append(self.build_labeled_state(
-                    staticState=staticState,
+                    staticState=environmentalState,
                     listOfAgents=cognitiveAgents,
-                    binOwnership=binOwnership
+                    binOwnership=binOwnership,
+                    adversarialState=adversarialState
                 ))
                 observationStates.append(self.build_observation_state(
-                    staticState=staticState,
+                    staticState=environmentalState,
                     listOfAgents=cognitiveAgents,
                     iteration=i,
-                    iterationsInPulse=iterationsInPulse
+                    iterationsInPulse=iterationsInPulse,
+                    adversarialState=adversarialState
                 ))
             deadSpaceInterval = self.getLargestDeadSpaceInterval(currentState)
             if deadSpaceInterval == None:
@@ -965,7 +995,7 @@ class Environment:
         stateMatrix = np.stack(states_list)
         alphaMatrix = np.stack(alphas_list)
 
-        colorCount = len(cognitiveAgents) + 3 # Free + Static + Collision
+        colorCount = len(cognitiveAgents) + 4 # Free + Static + Adversary + Collision
 
         cmap = self.build_agent_colormap(colorCount)
 
@@ -1020,6 +1050,7 @@ class Environment:
         tickLabels.append("Static Agents")
         for agent, class_name, class_index in self.enumerate_agents_by_class(cognitiveAgents):
             tickLabels.append(f"{class_name} {class_index}")
+        tickLabels.append("Adversaries")
         tickLabels.append("Collision")
 
         cbar.ax.set_yticklabels(tickLabels)
@@ -1034,7 +1065,7 @@ class Environment:
 
         colorCount = (
             len(cognitiveAgents)
-            + 2 # Free + Static
+            + 3 # Free + Static + Adversary
         )
 
         cmap = self.build_agent_colormap(colorCount)
@@ -1087,6 +1118,7 @@ class Environment:
         tickLabels = ["Empty", "Static Agents"]
         for agent, class_name, class_index in self.enumerate_agents_by_class(cognitiveAgents):
             tickLabels.append(f"{class_name} {class_index}")
+        tickLabels.append("Adversaries")
 
         cbar.ax.set_yticklabels(tickLabels)
 

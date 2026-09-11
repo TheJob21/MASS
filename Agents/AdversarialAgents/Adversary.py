@@ -12,7 +12,10 @@ class Adversary(Agent):
                  pulsesPerAction=1,
                  focusTime=15360, # 15,360 is 3 CPI lengths for radar.
                  refocusTime=97657, # 97,657 is number of iterations in 1 second for 10.24usec iteration
-                 rng=None):
+                 rng=None, 
+                 bwBinCount=50,
+                 startDelay=20):
+        super().__init__(currentAction=currentAction, fftSize=fftSize)
         self.iterationsSinceScenarioStart = -1
         self.allActions = [] # array of tuples (centerFreq (MHz), BW (MHz))
         self.collisions = [] # array of total frequency overlap in MHz
@@ -29,16 +32,22 @@ class Adversary(Agent):
         self.focusTime = focusTime # iterations
         self.refocusTime = refocusTime # iterations
         self.rng = rng
-        super().__init__(currentAction=currentAction, fftSize=fftSize)
+        self.bwBinCount = bwBinCount
+        self.startDelay = startDelay
+        self.actionToWobble = None
 
     def selectAction(self):
         self.iterationsSinceScenarioStart += 1
+        iterationWithDelay = self.iterationsSinceScenarioStart - self.startDelay
+        
+        if iterationWithDelay < 0:
+            return
 
-        if self.iterationsSinceScenarioStart % (self.refocusTime+self.focusTime) >= self.focusTime:
+        if iterationWithDelay % (self.refocusTime+self.focusTime) >= self.focusTime:
             self.isTransmitting = False
             self.currentAction = self.actionToWobble = None
             return
-        elif self.iterationsSinceScenarioStart % (self.refocusTime+self.focusTime) == 0: # select new action
+        elif iterationWithDelay % (self.refocusTime+self.focusTime) == 0: # select new action
             self.isTransmitting = True
             largestStart = None
             largestEnd = None
@@ -66,7 +75,7 @@ class Adversary(Agent):
                 return
 
             center = (largestStart + largestEnd) // 2
-            self.currentAction = self.actionToWobble = max(0, center-25), min(self.fftSize, center+25)
+            self.currentAction = self.actionToWobble = max(0, center-(self.bwBinCount/2)), min(self.fftSize, center+(self.bwBinCount/2))
         else: # wobble current action
             if self.actionToWobble is None:
                 return

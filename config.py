@@ -68,7 +68,7 @@ AGENTS = {
     "mfos": 0,
     "dpg": 0,
     "ablated_mfos": 0,
-    "adversary": 1
+    "adversary": 2
 }
 
 # PPO
@@ -134,7 +134,7 @@ if not LIMIT_OBSERVATION:
 OBSERVATION_CENTER_COUNT = 1
 
 # RUNTIME CONTROL
-ITERATIONS = 2_500_000
+ITERATIONS = 1_500_000
 SPECTRUM_SAMPLE_SIZE = 100_000
 PULSES_PER_ACTION = 1 # Every X pulses, choose new action
 
